@@ -1,0 +1,1 @@
+python3 scripts/flashtool.py --app my_project

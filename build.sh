@@ -1,0 +1,1 @@
+make -C build/apps/my_project -j4

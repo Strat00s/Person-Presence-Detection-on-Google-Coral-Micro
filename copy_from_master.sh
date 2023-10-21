@@ -1,0 +1,1 @@
+cp -r src/* coralmicro/apps/my_project
