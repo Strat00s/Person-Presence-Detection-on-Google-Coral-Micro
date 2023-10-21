@@ -10,3 +10,6 @@ Slow upload. When uploading the finish program, it is really slow.
 
 Upload. The device connects as 3 different devices when operating normally and as multiple different HID devices during upload. Since there is no build and upload script for windows. only virtual machine or bare metal linux can be used for developement.
 
+## Camera
+Quality is actually ok. But white balancing happens only on initialization
+- TODO FIX
