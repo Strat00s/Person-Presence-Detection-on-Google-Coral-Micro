@@ -22,10 +22,14 @@
 #include "libs/tensorflow/posenet.h"
 #include "libs/tensorflow/posenet_decoder_op.h"
 #include "libs/tpu/edgetpu_manager.h"
-#include "third_party/mjson/src/mjson.h"
 #include "third_party/tflite-micro/tensorflow/lite/micro/micro_error_reporter.h"
 #include "third_party/tflite-micro/tensorflow/lite/micro/micro_interpreter.h"
 #include "third_party/tflite-micro/tensorflow/lite/micro/micro_mutable_op_resolver.h"
+
+
+#include "libs/base/gpio.h"
+#include "libs/tensorflow/detection.h"
+#include "libs/tpu/edgetpu_op.h"
 
 using namespace coralmicro;
 using namespace std;
@@ -34,17 +38,50 @@ using namespace std;
 #define INDEX_FILE_NAME "/coral_micro_camera.html"
 #define STREAM_PREFIX "/camera_stream"
 
-#define MODEL_PATH "/models/bodypix_mobilenet_v1_075_324_324_16_quant_decoder_edgetpu.tflite"
+#define MODEL_PATH "/models/tf2_ssd_mobilenet_v2_coco17_ptq_edgetpu.tflite"
 
-#define TENSOR_ARENA_SIZE     2 * 1024 * 1024
+#define TENSOR_ARENA_SIZE     8 * 1024 * 1024
 #define CONFIDENCE_THRESHOLD  0.5f
 #define LOW_CONFIDENCE_RESULT -2
 
 
 STATIC_TENSOR_ARENA_IN_SDRAM(tensor_arena, TENSOR_ARENA_SIZE);
 
-tflite::MicroMutableOpResolver<2> resolver;
+tflite::MicroMutableOpResolver<3> resolver;
 tflite::MicroInterpreter *interpreter;
+
+void drawHorizontalLine(int y, int x_min, int x_max, std::vector<uint8_t> *image, int width, int height, uint8_t r, uint8_t g, uint8_t b) {
+    int start = width * y + x_min;
+    for (int i = start; i < start + (x_max - x_min); i++) {
+        (*image)[i * 3]     = r;
+        (*image)[i * 3 + 1] = g;
+        (*image)[i * 3 + 2] = b;
+    }
+}
+
+void drawVerticalLine(int x, int y_min, int y_max, std::vector<uint8_t> *image, int width, int height, uint8_t r, uint8_t g, uint8_t b) {
+    int start_x = y_min * width + x;
+    for (int i = start_x; i < start_x + width * (y_max - y_min); i += width) {
+        (*image)[i * 3]     = r;
+        (*image)[i * 3 + 1] = g;
+        (*image)[i * 3 + 2] = b;
+    }
+}
+
+void drawRectangle(int y_min, int y_max, int x_min, int x_max, std::vector<uint8_t> *image, int width, int height, uint8_t r = 0, uint8_t g = 255, uint8_t b = 0) {
+    if (y_min > height)
+        y_min = height;
+    if (y_max < 0)
+        y_max = 0;
+    if (x_min < 0)
+        x_min = 0;
+    if (x_max > width)
+        x_max = width;
+    drawHorizontalLine(y_min, x_min, x_max, image, width, height, r, g, b);
+    drawHorizontalLine(y_max, x_min, x_max, image, width, height, r, g, b);
+    drawVerticalLine(x_min, y_min, y_max, image, width, height, r, g, b);
+    drawVerticalLine(x_max, y_min, y_max, image, width, height, r, g, b);
+}
 
 
 HttpServer::Content UriHandler(const char* uri) {
@@ -52,106 +89,84 @@ HttpServer::Content UriHandler(const char* uri) {
         return std::string(INDEX_FILE_NAME);
     
     else if (StrEndsWith(uri, STREAM_PREFIX)) {
-        //auto* interpreter   = static_cast<tflite::MicroInterpreter*>(r->ctx->response_cb_data);
-        auto* bodypix_input = interpreter->input(0);
-        auto model_height   = bodypix_input->dims->data[1];
-        auto model_width    = bodypix_input->dims->data[2];
+        //get input tensor dimensions
+        auto* input_tensor = interpreter->input(0);
+        auto model_height  = input_tensor->dims->data[1];
+        auto model_width   = input_tensor->dims->data[2];
 
         std::vector<uint8_t> image(model_width * model_height * CameraFormatBpp(CameraFormat::kRgb));
-        std::vector<tensorflow::Pose> results;
-
+        
+        //create camera frame
         auto fmt = CameraFrameFormat{
             CameraFormat::kRgb,
             CameraFilterMethod::kBilinear,
             CameraRotation::k270,
             model_width,
             model_height,
-            false,                  //preserver ratio
-            image.data(),
-            true                    //white balance
+            false,
+            image.data()
         };
 
+        //CameraTask::GetSingleton()->Trigger();
         if (!CameraTask::GetSingleton()->GetFrame({fmt})) {
             printf("Failed to get image from camera.\r\n");
             return {};
         }
 
-        std::memcpy(tflite::GetTensorData<uint8_t>(bodypix_input), image.data(), image.size());
+        //copy image data to tensor
+        std::memcpy(tflite::GetTensorData<uint8_t>(input_tensor), image.data(), image.size());
 
         if (interpreter->Invoke() != kTfLiteOk) {
             printf("Invoke failed\r\n");
             return {};
         }
 
-        results = tensorflow::GetPosenetOutput(interpreter, CONFIDENCE_THRESHOLD);
-        //if (results.empty()) {
-        //    printf("Below confidence threshold\r\n");
-        //    return {};
-        //}
-
-        //const auto& float_segments_tensor = interpreter->output_tensor(5);
-        //const auto& float_segments = tflite::GetTensorData<uint8_t>(float_segments_tensor);
-        //const auto segment_size = tensorflow::TensorSize(float_segments_tensor);
-
-        TfLiteTensor *output_tensor = interpreter->output(5);
-        int segment_size = tensorflow::TensorSize(output_tensor);
-
-        //printf("interpreter output size: %d\r\n", interpreter->outputs_size());
-        printf("segment size: %d \r\n", segment_size);
-        printf("Success\r\n");
-
-        uint8_t *data = tflite::GetTensorData<uint8_t>(output_tensor);
-
-
-        std::vector<uint8_t> heatmap(segment_size * 3 * 100);
-
-        int h = 21;
-        int w = 21;
-        int W = 210;
-        int H = 210;
+        //get 5 results
+        std::vector<tensorflow::Object> results = tensorflow::GetDetectionResults(interpreter, 0.5);
+        if (results.empty()) {
+            printf("Nothing detected (below confidence threshold)\r\n");
+            return {};
+        }
+        printf("Number of objects: %d \r\n", results.size());
+        //printf("%s\r\n", tensorflow::FormatDetectionOutput(results).c_str());
         
-        // Calculate the mapping ratio
-        float width_ratio = static_cast<float>(W) / w;
-        float height_ratio = static_cast<float>(H) / h;
-        
-        // Loop through heatmap
-        for(int y_heat = 0; y_heat < h; ++y_heat) {
-            for(int x_heat = 0; x_heat < w; ++x_heat) {
-                int heatmap_idx = y_heat * w + x_heat;
-                unsigned char heat_value = data[heatmap_idx];
-
-                // Map to image coordinates
-                int x_img_start = static_cast<int>(x_heat * width_ratio);
-                int y_img_start = static_cast<int>(y_heat * height_ratio);
-                int x_img_end = static_cast<int>((x_heat + 1) * width_ratio);
-                int y_img_end = static_cast<int>((y_heat + 1) * height_ratio);
-
-                // Modify image pixels
-                for(int y_img = y_img_start; y_img < y_img_end; ++y_img) {
-                    for(int x_img = x_img_start; x_img < x_img_end; ++x_img) {
-                        int image_idx = (y_img * W + x_img) * 3;
-
-                        // Modify RGB data here
-                        // For example, adding heat_value to the red channel:
-                        heatmap[image_idx] = heat_value;
-
-                        // Repeat for other channels if necessary
-                    }
-                }
+        //draw bounding box around person
+        for (size_t i = 0; i < results.size(); i++) {
+            //search for person in results
+            if (results[i].id == 0) {
+                int x_min = results[i].bbox.xmin * model_width;
+                int x_max = results[i].bbox.xmax * model_width;
+                int y_min = results[i].bbox.ymin * model_height;
+                int y_max = results[i].bbox.ymax * model_height;
+                drawRectangle(y_min, y_max, x_min, x_max, &image, model_width, model_height);
+                break;
             }
         }
 
+        //draw boudning boxes for 5 results
+        //int r, g, b;
+        //for (int i = 0; i < 5; i++) {
+        //    switch (i) {
+        //        case 0:  r = 0;   g = 255; b = 0;   break;
+        //        case 1:  r = 255; g = 0;   b = 0;   break;
+        //        case 2:  r = 0;   g = 0;   b = 255; break;
+        //        case 3:  r = 0;   g = 128; b = 127; break;
+        //        case 4:  r = 128; g = 127; b = 0;   break;
+        //        default: r = 0;   g = 255; b = 0;   break;
+        //    }
+        //    int x_min = results[i].bbox.xmin * model_width;
+        //    int x_max = results[i].bbox.xmax * model_width;
+        //    int y_min = results[i].bbox.ymin * model_height;
+        //    int y_max = results[i].bbox.ymax * model_height;
+        //    drawRectangle(y_min, y_max, x_min, x_max, &image, model_width, model_height, r, g, b);
+        //}
+
         std::vector<uint8_t> jpeg;
-        JpegCompressRgb(heatmap.data(), 210, 210, /*quality=*/100, &jpeg);
+        JpegCompressRgb(image.data(), model_width, model_height, /*quality=*/75, &jpeg);
         // [end-snippet:jpeg]
         return jpeg;
     }
     return {};
-
-    //jsonrpc_return_success(r, "{%Q: %d, %Q: %d, %Q: %V, %Q: %V}", "width",
-    //                     model_width, "height", model_height, "base64_data",
-    //                     image.size(), image.data(), "output_mask1",
-    //                     segment_size, float_segments);
 }
 
 
@@ -161,7 +176,16 @@ extern "C" void app_main(void* param) {
     LedSet(Led::kStatus, true);
     printf("Bodypix HTTP test\r\n");
 
+
     tflite::MicroErrorReporter error_reporter;
+    //Read the model and checks version.
+    std::vector<uint8_t> model_raw;  //entire model is stored in this vector
+    if (!LfsReadFile(MODEL_PATH, &model_raw)) {
+        TF_LITE_REPORT_ERROR(&error_reporter, "Failed to load model!");
+        vTaskSuspend(nullptr);
+    }
+
+
     //Turn on the TPU and get it's context.
     auto tpu_context = EdgeTpuManager::GetSingleton()->OpenDevice(PerformanceMode::kMax);
     if (!tpu_context) {
@@ -169,25 +193,24 @@ extern "C" void app_main(void* param) {
         vTaskSuspend(nullptr);
     }
 
-    //Read the model and checks version.
-    std::vector<uint8_t> bodypix_tflite_raw;  //entire model is stored in this vector
-    if (!LfsReadFile(MODEL_PATH, &bodypix_tflite_raw)) {
-        TF_LITE_REPORT_ERROR(&error_reporter, "Failed to load model!");
-        vTaskSuspend(nullptr);
-    }
-    auto* model = tflite::GetModel(bodypix_tflite_raw.data());
+    auto* model = tflite::GetModel(model_raw.data());
     if (model->version() != TFLITE_SCHEMA_VERSION) {
         TF_LITE_REPORT_ERROR(&error_reporter, "Model schema version is %d, supported is %d", model->version(), TFLITE_SCHEMA_VERSION);
         vTaskSuspend(nullptr);
     }
 
-    //Create a micro interpreter.
-    //tflite::MicroMutableOpResolver<2> resolver;
+    //create micro interpreter
+    resolver.AddDequantize();
+    resolver.AddDetectionPostprocess();
     resolver.AddCustom(kCustomOp, RegisterCustomOp());
-    resolver.AddCustom(kPosenetDecoderOp, RegisterPosenetDecoderOp());
     interpreter = new tflite::MicroInterpreter(model, resolver, tensor_arena, TENSOR_ARENA_SIZE, &error_reporter);
     if (interpreter->AllocateTensors() != kTfLiteOk) {
         TF_LITE_REPORT_ERROR(&error_reporter, "AllocateTensors failed.");
+        vTaskSuspend(nullptr);
+    }
+
+    if (interpreter->inputs().size() != 1) {
+        printf("ERROR: Model must have only one input tensor\r\n");
         vTaskSuspend(nullptr);
     }
 
