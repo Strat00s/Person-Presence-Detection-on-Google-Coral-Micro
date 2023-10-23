@@ -13,3 +13,9 @@ Upload. The device connects as 3 different devices when operating normally and a
 ## Camera
 Quality is actually ok. But white balancing happens only on initialization
 - TODO FIX
+
+TPU is probably connected through USB -> sending large amount of data leads to USB transmit timeout and total system halt.
+
+USB HTTP Server is lows and misses
+
+270 rotation is camera up, port down.
