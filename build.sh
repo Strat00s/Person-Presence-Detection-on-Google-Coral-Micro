@@ -1,1 +1,1 @@
-make -C build/apps/my_project -j4
+make -C coralmicro/build/apps/$1 -j4

@@ -1,0 +1,209 @@
+<!--function getJsonData(url) {
+    return fetch(url).then(response => {
+        // Check if the response is ok (status code 200-299)
+        if (!response.ok) {
+            console.error('Not OK ' + response.statusText);
+            return {};
+        }
+        return response.json(); // or response.json() if the response is JSON
+    })
+}-->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Camera grid mask</title>
+
+  <style>
+      body {
+          margin: 0;
+          padding: 0;
+          color: #fd5e4d;
+      }
+      #main-container {
+          position: relative;
+          margin: auto;
+          border: 1px solid #53bfc1;
+          user-select: none;
+      }
+      #coral-cam-title-container {
+          white-space: nowrap;
+          height: 45px;
+          background: #fd5e4d;
+          border-bottom: 1px solid #53bfc1;
+      }
+      .coral-cam-title {
+          line-height: 45px;
+          font-size: 30px;
+          display: inline-block;
+          color: #f5d0cb;
+          padding-left: 10px;
+      }
+      #coral-micro-camera-image {
+          position: absolute;
+      }
+      #setting-menu {
+          height: 50px;
+          background: #f5d0cb;
+          border-top: 1px solid #53bfc1;
+      }
+      .input-label {
+          padding-left: 10px;
+      }
+
+      #gridCanvas {
+          position: absolute;
+          width: 320px;
+          height: 320px;
+      }
+      .cell {
+          width: 10px; /* 320px / 32 cells */
+          height: 10px;
+          float: left;
+          border: 1px solid #ddd;
+          box-sizing: border-box;
+          cursor: pointer;
+      }
+      .toggled {
+          background-color: rgba(255, 165, 0, 0.5);
+      }
+      #saveMaskBtn {
+          margin: 20px auto;
+          display: block;
+      }
+  </style>
+</head>
+<body id="body" onload="start()">
+  <div id="main-container">
+    <div id="coral-cam-title-container">
+      <label class="coral-cam-title">Coral Micro Cam</label>
+    </div>
+    <div id="setting-menu">
+      <div style="margin-top: 10px"></div>
+      <label for="image-width" class="input-label">Image Width:</label>
+      <input id="image-width" type="number" required value=320>
+      <label for="image-height" class="input-label">Image Height:</label>
+      <input id="image-height" type="number" required value=320>
+      <label for="image-rotation" class="input-label">Rotation:</label>
+      <select name="image-rotation" id="image-rotation">
+        <option value=0 selected>0</option>
+        <option value=90>90</option>
+        <option value=180>180</option>
+        <option value=270>270</option>
+      </select>
+    </div>
+
+    <div id="main-container">
+      <img id="coral-micro-camera-image" src="https://picsum.photos/320/320" alt="Image cannot be displayed"/>
+      <div id="gridCanvas"></div>
+    </div>
+    <button id="saveMaskBtn">Save Mask</button>
+
+  </div>
+
+  <script type="text/javascript">
+    function start() {
+      createGrid();
+      updateImage();
+    }
+
+    const imgUrl = "/camera_stream";
+    function sleep (micro) {
+        return new Promise((resolve) => setTimeout(resolve, micro));
+    }
+
+    async function updateImage () {
+        const imgReader = new FileReader();
+        while (1) {
+            fetch(imgUrl)
+                .then((resp) => { return resp.blob(); })
+                .then((imageBlob) => {
+                    imgReader.readAsDataURL(imageBlob);
+                    imgReader.onloadend = () => {
+                        let imgElt = document.getElementById("coral-micro-camera-image")
+                        imgElt.src = imgReader.result;
+                        imgElt.width = document.getElementById("image-width").value;
+                        imgElt.height = document.getElementById("image-height").value;
+                        let rotation = document.getElementById("image-rotation").value;
+                        imgElt.style.transform = 'rotate(' + rotation.toString() + 'deg)';
+                    };
+                })
+                .catch((reason => {
+                    console.error("Error while fetching image: " + reason.toString());
+                }));
+            await sleep(100);
+        }
+    }
+
+    // Initialize grid and mask data structure
+    const gridSize = 32; // Default grid size
+    let mask = new Array(gridSize);
+    for (let i = 0; i < gridSize; i++) {
+      mask[i] = new Array(gridSize).fill(0);
+    }
+
+    let mouseIsDown = false; // Tracks if the mouse is pressed down
+
+    // Function to toggle cells
+    function toggleCell(cell, i, j) {
+        if (!cell.classList.contains('toggled')) {
+            cell.classList.add('toggled');
+            mask[i][j] = 1;
+        }
+    }
+
+    // Function to create grid cells
+    function createGrid() {
+        const gridCanvas = document.getElementById('gridCanvas');
+        for (let i = 0; i < gridSize; i++) {
+            for (let j = 0; j < gridSize; j++) {
+                const cell = document.createElement('div');
+                cell.className = 'cell';
+                cell.dataset.toggled = false; // Custom attribute to track state
+                cell.addEventListener('mousedown', function(event) {
+                    mouseIsDown = true;
+                    // Only toggle if not already toggled in this mousedown event
+                    if (cell.dataset.toggled == "false") {
+                        toggleCell(cell, i, j);
+                        cell.dataset.toggled = true; // Update state
+                    }
+                    event.preventDefault(); // Prevent text selection
+                });
+                cell.addEventListener('mouseenter', function() {
+                    if (mouseIsDown && cell.dataset.toggled == "false") {
+                        toggleCell(cell, i, j);
+                    }
+                });
+                cell.addEventListener('mouseup', function() {
+                    mouseIsDown = false;
+                    cell.dataset.toggled = false; // Reset state
+                });
+                gridCanvas.appendChild(cell);
+            }
+        }
+    }
+
+    // Reset the toggle tracking on mouseup anywhere in the window
+    window.addEventListener('mouseup', function() {
+        mouseIsDown = false;
+        let cells = document.getElementsByClassName('cell');
+        for (let cell of cells) {
+            cell.dataset.toggled = false; // Reset all cells' state
+        }
+    });
+
+    // Function to print the mask
+    function saveMask() {
+      console.log('Mask array:');
+      console.log(mask);
+    }
+
+    // Event listener for the save button
+    document.getElementById('saveMaskBtn').addEventListener('click', saveMask);
+
+    // Call createGrid on page load
+    //window.onload = createGrid;
+  </script>
+</body>
+</html>
