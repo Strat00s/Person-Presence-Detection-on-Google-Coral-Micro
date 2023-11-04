@@ -105,7 +105,7 @@
   <script type="text/javascript">
     function start() {
       createGrid();
-      updateImage();
+      //updateImage();
     }
 
     const imgUrl = "/camera_stream";
@@ -144,13 +144,16 @@
     }
 
     let mouseIsDown = false; // Tracks if the mouse is pressed down
+    let toggle_dir = 0;
 
     // Function to toggle cells
     function toggleCell(cell, i, j) {
-        if (!cell.classList.contains('toggled')) {
-            cell.classList.add('toggled');
-            mask[i][j] = 1;
-        }
+      if (toggle_dir)
+        cell.classList.add('toggled');
+      else
+        cell.classList.remove('toggled');
+      
+      mask[i][j] = toggle_dir;
     }
 
     // Function to create grid cells
@@ -161,23 +164,19 @@
                 const cell = document.createElement('div');
                 cell.className = 'cell';
                 cell.dataset.toggled = false; // Custom attribute to track state
+                
                 cell.addEventListener('mousedown', function(event) {
                     mouseIsDown = true;
-                    // Only toggle if not already toggled in this mousedown event
-                    if (cell.dataset.toggled == "false") {
-                        toggleCell(cell, i, j);
-                        cell.dataset.toggled = true; // Update state
-                    }
+                    toggle_dir = mask[i][j] ? 0 : 1;
+                    toggleCell(cell, i, j);
                     event.preventDefault(); // Prevent text selection
                 });
                 cell.addEventListener('mouseenter', function() {
-                    if (mouseIsDown && cell.dataset.toggled == "false") {
-                        toggleCell(cell, i, j);
-                    }
+                    if (mouseIsDown)
+                      toggleCell(cell, i, j);
                 });
                 cell.addEventListener('mouseup', function() {
                     mouseIsDown = false;
-                    cell.dataset.toggled = false; // Reset state
                 });
                 gridCanvas.appendChild(cell);
             }
