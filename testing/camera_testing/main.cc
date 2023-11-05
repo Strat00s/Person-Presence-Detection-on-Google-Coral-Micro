@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "libs/base/http_server.h"
+#include "apps/camera_testing/libs/http_server.h"
 #include "libs/base/led.h"
 #include "libs/base/strings.h"
 #include "libs/base/utils.h"
@@ -18,7 +19,7 @@
 #include "third_party/freertos_kernel/include/task.h"
 
 #include "libs/base/filesystem.h"
-#include "libs/rpc/rpc_http_server.h"
+//#include "libs/rpc/rpc_http_server.h"
 #include "libs/tensorflow/posenet.h"
 #include "libs/tensorflow/posenet_decoder_op.h"
 #include "libs/tpu/edgetpu_manager.h"
@@ -36,7 +37,9 @@ using namespace std;
 
 
 #define INDEX_FILE_NAME "/coral_micro_camera.html"
-#define STREAM_PREFIX "/camera_stream"
+#define STREAM_PATH     "/camera_stream"
+#define LOAD_MASK_PATH  "/load_mask"
+#define SAVE_MASK_PATH  "/save_mask"
 
 
 #define IMG_WIDTH  320
@@ -71,36 +74,57 @@ void appendToVector(std::vector<uint8_t> &dst, std::vector<uint8_t> &src) {
 
 uint32_t frame_num = 0;
 
+vector<uint8_t> captureImage(int width, int height, CameraFormat format) {
+    std::vector<uint8_t> image(width * height * CameraFormatBpp(format));
+
+    //create camera frame
+    auto fmt = CameraFrameFormat{
+        format,
+        CameraFilterMethod::kBilinear,
+        CameraRotation::k270,
+        width,
+        height,
+        false,
+        image.data()
+    };
+
+    if (!CameraTask::GetSingleton()->GetFrame({fmt})) {
+        printf("Failed to get image from camera.\r\n");
+        return vector<uint8_t>();
+    }
+
+    printf("Frame %ld\r\n", frame_num++);
+
+    return image;
+}
+
+
 HttpServer::Content UriHandler(const char* uri) {
     if (StrEndsWith(uri, "index.shtml") || StrEndsWith(uri, "coral_micro_camera.html"))
         return std::string(INDEX_FILE_NAME);
     
-    else if (StrEndsWith(uri, STREAM_PREFIX)) {
-        std::vector<uint8_t> image(IMG_WIDTH * IMG_HEIGHT * CameraFormatBpp(CameraFormat::kRgb));
-        
-        //create camera frame
-        auto fmt = CameraFrameFormat{
-            CameraFormat::kRgb,
-            CameraFilterMethod::kBilinear,
-            CameraRotation::k270,
-            IMG_WIDTH,
-            IMG_HEIGHT,
-            false,
-            image.data()
-        };
-
-        if (!CameraTask::GetSingleton()->GetFrame({fmt})) {
-            printf("Failed to get image from camera.\r\n");
+    else if (StrEndsWith(uri, STREAM_PATH)) {
+        auto image = captureImage(IMG_WIDTH, IMG_HEIGHT, CameraFormat::kRgb);
+        if (image.size() == 0)
             return {};
-        }
-        frame_num++;
 
         std::vector<uint8_t> jpeg;
         JpegCompressRgb(image.data(), IMG_WIDTH, IMG_HEIGHT, 75, &jpeg);
-        printf("Frame %ld\r\n", frame_num);
         return jpeg;
     }
+
+    else if (StrEndsWith(uri, LOAD_MASK_PATH)) {
+        return {};
+    }
+    else if (StrEndsWith(uri, SAVE_MASK_PATH)) {
+        return {};
+    }
+
     return {};
+}
+
+void onPostFinished(payload_uri_t payload_uri) {
+    printf("on post finished\r\n");
 }
 
 
@@ -122,7 +146,9 @@ extern "C" void app_main(void* param) {
         vTaskSuspend(nullptr);
     }
 
-    HttpServer http_server;
+    PostHttpServer http_server;
+    http_server.addPostPath(SAVE_MASK_PATH);
+    http_server.registerPostFinishedCallback(onPostFinished);
     http_server.AddUriHandler(UriHandler);
     UseHttpServer(&http_server);
 
