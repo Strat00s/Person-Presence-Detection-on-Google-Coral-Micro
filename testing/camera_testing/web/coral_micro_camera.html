@@ -42,7 +42,7 @@
         }
         
         #gridCanvas {
-            display: none;
+            display: 'none';
             position: absolute;
             width: 320px;
             height: 320px;
@@ -135,6 +135,28 @@
                 console.error('Error:', error); // Handle any errors
             });
         }
+
+        function postCsvData(url, data) {
+            fetch(url, {
+                method: 'POST', 
+                headers: {
+                    'Content-Type': 'text,csv', // Indicate that the request body is JSON
+                },
+                body: data // Attach the JSON data as the body of the request
+            })
+            .then(response => {
+                if (response.ok) {
+                    return response.json(); // or 'response.text()' if the response is not JSON
+                }
+                throw new Error('Network response was not ok.');
+            })
+            .then(responseData => {
+                console.log('Success:', responseData); // Handle the response data
+            })
+            .catch(error => {
+                console.error('Error:', error); // Handle any errors
+            });
+        }
         
         
         function getJsonData(url) {
@@ -164,11 +186,15 @@
             console.log("TODO")
         }
         
-        // Function to print the mask
         function saveMask() {
-            let payload = {"grid": mask[0]};
+            let payload = "32,32,";
+            mask[0].forEach(row => {
+                row.forEach(item => {
+                    payload += item;
+                })
+            })
             console.log(payload);
-            postJsonData('/save_mask', payload);
+            postCsvData('/save_mask', payload);
         }
         
         function resetMask() {

@@ -1,54 +1,9 @@
-<!--
- Copyright 2022 Google LLC
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
--->
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Coral Micro Cam HTTP</title>
-    <script type="text/javascript">
-        // Coral Micro's image url.
-        const imgUrl = "/camera_stream";
-        // Sleeps for micro seconds.
-        function sleep (micro) {
-            return new Promise((resolve) => setTimeout(resolve, micro));
-        }
-        // Main loop that updates the img tag.
-        async function updateImage () {
-            const imgReader = new FileReader();
-            while (1) {
-                fetch(imgUrl)
-                    .then((resp) => { return resp.blob(); })
-                    .then((imageBlob) => {
-                        imgReader.readAsDataURL(imageBlob);
-                        imgReader.onloadend = () => {
-                            let imgElt = document.getElementById("coral-micro-camera-image")
-                            imgElt.src = imgReader.result;
-                            imgElt.width = document.getElementById("image-width").value;
-                            imgElt.height = document.getElementById("image-height").value;
-                            let rotation = document.getElementById("image-rotation").value;
-                            imgElt.style.transform = 'rotate(' + rotation.toString() + 'deg)';
-                        };
-                    })
-                    .catch((reason => {
-                        console.error("Error while fetching image: " + reason.toString());
-                    }));
-                await sleep(500);
-            }
-        }
-    </script>
+    <title>Camera grid mask</title>
+    
     <style>
         body {
             margin: 0;
@@ -56,7 +11,10 @@
             color: #fd5e4d;
         }
         #main-container {
+            position: relative;
+            margin: auto;
             border: 1px solid #53bfc1;
+            user-select: none;
         }
         #coral-cam-title-container {
             white-space: nowrap;
@@ -72,10 +30,7 @@
             padding-left: 10px;
         }
         #coral-micro-camera-image {
-            display: block;
-            margin-left: auto;
-            margin-right: auto;
-            border-top: 1px solid #53bfc1;
+            position: absolute;
         }
         #setting-menu {
             height: 50px;
@@ -85,30 +40,269 @@
         .input-label {
             padding-left: 10px;
         }
+        
+        #gridCanvas {
+            display: 'none';
+            position: absolute;
+            width: 320px;
+            height: 320px;
+        }
+        .cell {
+            width: 10px; /* 320px / 32 cells */
+            height: 10px;
+            float: left;
+            border: 1px solid #ddd;
+            box-sizing: border-box;
+            cursor: pointer;
+        }
+        .toggled {
+            background-color: rgba(255, 0, 0, 0.5);
+        }
+        #toggleMaskBtn {
+            margin: 20px auto;
+            display: block;
+        }
+        #loadMaskBtn {
+            margin: 20px auto;
+            display: block;
+        }
+        #saveMaskBtn {
+            margin: 20px auto;
+            display: block;
+        }
+        #resetMaskBtn {
+            margin: 20px auto;
+            display: block;
+        }
     </style>
 </head>
-<body id="body" onload="updateImage()">
-<div id="main-container">
-    <div id="coral-cam-title-container">
-        <label class="coral-cam-title">Coral Micro Cam</label>
+<body id="body" onload="start()">
+    <div id="main-container">
+        <div id="coral-cam-title-container">
+            <label class="coral-cam-title">Coral Micro Cam</label>
+        </div>
+        <div id="setting-menu">
+            <div style="margin-top: 10px"></div>
+            <label for="image-width" class="input-label">Image Width:</label>
+            <input id="image-width" type="number" required value=320>
+            <label for="image-height" class="input-label">Image Height:</label>
+            <input id="image-height" type="number" required value=320>
+            <label for="image-rotation" class="input-label">Rotation:</label>
+            <select name="image-rotation" id="image-rotation">
+                <option value=0 selected>0</option>
+                <option value=90>90</option>
+                <option value=180>180</option>
+                <option value=270>270</option>
+            </select>
+        </div>
+        
+        <div id="main-container">
+            <img id="coral-micro-camera-image" src="https://picsum.photos/320/320" alt="Image cannot be displayed"/>
+            <div id="gridCanvas"></div>
+        </div>
+        <button id="toggleMaskBtn" onclick="toggleMask()">Toggle Mask</button>
+        <button id="loadMaskBtn"   onclick="loadMask()">Load Mask</button>
+        <button id="saveMaskBtn"   onclick="saveMask()">Save Mask</button>
+        <button id="resetMaskBtn"  onclick="resetMask()">Reset Mask</button>
+        
     </div>
-    <div id="setting-menu">
-        <div style="margin-top: 10px"></div>
-        <label for="image-width" class="input-label">Image Width:</label>
-        <input id="image-width" type="number" required value=500>
-        <label for="image-height" class="input-label">Image Height:</label>
-        <input id="image-height" type="number" required value=500>
-        <label for="image-rotation" class="input-label">Rotation:</label>
-        <select name="image-rotation" id="image-rotation">
-            <option value=0>0</option>
-            <option value=90>90</option>
-            <option value=180>180</option>
-            <option value=270 selected>270</option>
-        </select>
-    </div>
-    <img id="coral-micro-camera-image"
-         src="https://picsum.photos/200/300"
-         alt="Image cannot be displayed">
-</div>
+    
+    <script type="text/javascript">
+        function start() {
+            createGrid();
+            updateImage();
+        }
+
+
+        function postJsonData(url, data) {
+            fetch(url, {
+                method: 'POST', 
+                headers: {
+                    'Content-Type': 'application/json', // Indicate that the request body is JSON
+                },
+                body: JSON.stringify(data) // Attach the JSON data as the body of the request
+            })
+            .then(response => {
+                if (response.ok) {
+                    return response.json(); // or 'response.text()' if the response is not JSON
+                }
+                throw new Error('Network response was not ok.');
+            })
+            .then(responseData => {
+                console.log('Success:', responseData); // Handle the response data
+            })
+            .catch(error => {
+                console.error('Error:', error); // Handle any errors
+            });
+        }
+
+        function postCsvData(url, data) {
+            fetch(url, {
+                method: 'POST', 
+                headers: {
+                    'Content-Type': 'text,csv', // Indicate that the request body is JSON
+                },
+                body: data // Attach the JSON data as the body of the request
+            })
+            .then(response => {
+                if (response.ok) {
+                    return response.json(); // or 'response.text()' if the response is not JSON
+                }
+                throw new Error('Network response was not ok.');
+            })
+            .then(responseData => {
+                console.log('Success:', responseData); // Handle the response data
+            })
+            .catch(error => {
+                console.error('Error:', error); // Handle any errors
+            });
+        }
+        
+        
+        function getJsonData(url) {
+            return fetch(url).then(response => {
+                // Check if the response is ok (status code 200-299)
+                if (!response.ok) {
+                    console.error('Not OK ' + response.statusText);
+                    return {};
+                }
+                return response.json(); // or response.json() if the response is JSON
+            })
+        }
+        
+        
+        function toggleMask() {
+            var grid = document.getElementById('gridCanvas');
+            if (grid.style.display == 'none')
+                grid.style.display = 'block'; // The grid was hidden, now show it
+            else
+                grid.style.display = 'none'; // The grid is visible, now hide it
+        }
+        
+        function loadMask() {
+            let payload = getJsonData("/load_mask");
+            if (payload.grid == undefined)
+                console.log("invalid json received");
+            console.log("TODO")
+        }
+        
+        function saveMask() {
+            let payload = "32,32,";
+            mask[0].forEach(row => {
+                row.forEach(item => {
+                    payload += item;
+                })
+            })
+            console.log(payload);
+            postCsvData('/save_mask', payload);
+        }
+        
+        function resetMask() {
+            for (let i = 0; i < gridSize; i++) {
+                for (let j = 0; j < gridSize; j++) {
+                    toggle_dir = 0;
+                    toggleCell(i, j);
+                }
+            }
+        }
+        
+        
+        //mask [0] -> mask values
+        //     [1] -> cell elements
+        // Initialize grid and mask data structure
+        const gridSize = 32; // Default grid size
+        let mask = [new Array(gridSize), new Array(gridSize)];
+        
+        for (let i = 0; i < gridSize; i++) {
+            mask[0][i] = new Array(gridSize).fill(0);
+            mask[1][i] = new Array(gridSize).fill(null);
+        }
+        
+
+        let mouseIsDown = false; // Tracks if the mouse is pressed down
+        let toggle_dir = 0;
+        
+        // Function to toggle cells
+        function toggleCell(i, j) {
+            if (toggle_dir)
+                mask[1][i][j].classList.add('toggled');//cell.classList.add('toggled');
+            else
+                mask[1][i][j].classList.remove('toggled');//cell.classList.remove('toggled');
+            
+            mask[0][i][j] = toggle_dir;
+        }
+        
+        // Function to create grid cells
+        function createGrid() {
+            const gridCanvas = document.getElementById('gridCanvas');
+            for (let i = 0; i < gridSize; i++) {
+                for (let j = 0; j < gridSize; j++) {
+                    const cell = document.createElement('div');
+                    cell.className = 'cell';
+                    cell.dataset.toggled = false; // Custom attribute to track state
+                    
+                    
+                    cell.addEventListener('mousedown', function(event) {
+                        mouseIsDown = true;
+                        toggle_dir = mask[0][i][j] ? 0 : 1;
+                        toggleCell(i, j);
+                        event.preventDefault(); // Prevent text selection
+                    });
+
+                    cell.addEventListener('mouseenter', function() {
+                        if (mouseIsDown)
+                            toggleCell(i, j);
+                    });
+
+                    cell.addEventListener('mouseup', function() {
+                        mouseIsDown = false;
+                    });
+
+                    gridCanvas.appendChild(cell);
+                    mask[1][i][j] = cell;
+                }
+            }
+        }
+        
+        // Reset the toggle tracking on mouseup anywhere in the window
+        window.addEventListener('mouseup', function() {
+            mouseIsDown = false;
+            let cells = document.getElementsByClassName('cell');
+            for (let cell of cells)
+                cell.dataset.toggled = false; // Reset all cells' state
+        });
+        
+        
+        const imgUrl = "/camera_stream";
+        function sleep (micro) {
+            return new Promise((resolve) => setTimeout(resolve, micro));
+        }
+        
+        async function updateImage () {
+            const imgReader = new FileReader();
+            while (1) {
+                fetch(imgUrl)
+                .then((resp) => { return resp.blob(); })
+                .then((imageBlob) => {
+                    imgReader.readAsDataURL(imageBlob);
+                    imgReader.onloadend = () => {
+                        let imgElt = document.getElementById("coral-micro-camera-image")
+                        imgElt.src = imgReader.result;
+                        imgElt.width = document.getElementById("image-width").value;
+                        imgElt.height = document.getElementById("image-height").value;
+                        let rotation = document.getElementById("image-rotation").value;
+                        imgElt.style.transform = 'rotate(' + rotation.toString() + 'deg)';
+                    };
+                })
+                .catch((reason => {
+                    console.error("Error while fetching image: " + reason.toString());
+                }));
+                await sleep(300);
+            }
+        }
+        
+        // Call createGrid on page load
+        //window.onload = createGrid;
+    </script>
 </body>
 </html>
