@@ -297,6 +297,8 @@ HttpServer::Content UriHandler(const char* uri) {
 void onPostFinished(payload_uri_t payload_uri) {
     printf("on post finished\r\n");
 
+    //handle only valid posts
+    //more valid addresses can be added here
     if (StrEndsWith(payload_uri.uri, SAVE_MASK_PATH)) {
         if (payload_uri.payload.size() <= 0) {
             printf("Invalid payload size");
@@ -304,6 +306,7 @@ void onPostFinished(payload_uri_t payload_uri) {
         }
 
         //TODO I am currently expecting the payload to be in valid format
+        //Get mask dimension from payload (csv)
         auto i = find(payload_uri.payload.begin(), payload_uri.payload.end(), ',');
         int start = 0;
         int end = i - payload_uri.payload.begin();
@@ -316,11 +319,13 @@ void onPostFinished(payload_uri_t payload_uri) {
 
         start = end + 1;
 
+        //clear mask, reserver enough space for new mask and copy mask
         image_mask.grid.clear();
         image_mask.grid.reserve(image_mask.height * image_mask.width);
         for (int i = 0; i < image_mask.height * image_mask.width; i++)
             image_mask.grid.push_back(payload_uri.payload[start + i] - '0');
 
+        //print the mask (for debuging)
         printf("Width: %u\r\n", image_mask.width);
         printf("Heigth: %u\r\n", image_mask.height);
         printf("Data: ");
