@@ -291,9 +291,11 @@ HttpServer::Content UriHandler(const char* uri) {
         return jpeg;
     }
     else if (StrEndsWith(uri, LOAD_MASK_PATH)) {
+        printf("Load not implemented yet");
         return {};
     }
     else if (StrEndsWith(uri, SAVE_MASK_PATH)) {
+        printf("Save not implemented yet");
         return {};
     }
 

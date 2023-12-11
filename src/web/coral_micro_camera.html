@@ -51,12 +51,12 @@
             width: 10px; /* 320px / 32 cells */
             height: 10px;
             float: left;
-            border: 1px solid #ddd;
+            border: 1px solid #dddddd57;
             box-sizing: border-box;
             cursor: pointer;
         }
         .toggled {
-            background-color: rgba(255, 0, 0, 0.5);
+            background-color: rgba(255, 0, 0, 0.338);
         }
         #toggleMaskBtn {
             margin: 20px auto;
@@ -274,36 +274,33 @@
         
         
         const imgUrl = "/camera_stream";
-        function sleep (micro) {
-            return new Promise((resolve) => setTimeout(resolve, micro));
-        }
-        
-        // Update image that waits for filereader to be finished
-        async function updateImage() {
-          const imgReader = new FileReader();
 
+        // faster image reading using objecturl instead of fileread
+        async function updateImage() {
           while (1) {
             try {
               let imageBlob = await fetch(imgUrl).then(resp => resp.blob());
-              imgReader.readAsDataURL(imageBlob);
+              let imgElt = document.getElementById("coral-micro-camera-image");
+              // Revoke the previous object URL to avoid memory leaks
+              if (imgElt.src.startsWith('blob:')) {
+                URL.revokeObjectURL(imgElt.src);
+              }
+              imgElt.src = URL.createObjectURL(imageBlob);
+              imgElt.width = document.getElementById("image-width").value;
+              imgElt.height = document.getElementById("image-height").value;
+              let rotation = document.getElementById("image-rotation").value;
+              imgElt.style.transform = 'rotate(' + rotation.toString() + 'deg)';
             } catch (reason) {
               console.error("Error while fetching image: " + reason.toString());
             }
-          
-            // Wait for FileReader to finish
-            await new Promise((resolve) => {
-              imgReader.onloadend = () => {
-                let imgElt = document.getElementById("coral-micro-camera-image");
-                imgElt.src = imgReader.result;
-                imgElt.width = document.getElementById("image-width").value;
-                imgElt.height = document.getElementById("image-height").value;
-                let rotation = document.getElementById("image-rotation").value;
-                imgElt.style.transform = 'rotate(' + rotation.toString() + 'deg)';
-              
-                resolve(); // Resolve the promise when FileReader is done
-              };
-            });
+            
+            // Adjust this value as needed for performance and update frequency
+            await sleep(20);
           }
+        }
+
+        function sleep (ms) {
+            return new Promise((resolve) => setTimeout(resolve, ms));
         }
         
         // Call createGrid on page load
