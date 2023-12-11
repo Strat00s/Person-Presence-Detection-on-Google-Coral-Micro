@@ -278,27 +278,32 @@
             return new Promise((resolve) => setTimeout(resolve, micro));
         }
         
-        async function updateImage () {
-            const imgReader = new FileReader();
-            while (1) {
-                fetch(imgUrl)
-                .then((resp) => { return resp.blob(); })
-                .then((imageBlob) => {
-                    imgReader.readAsDataURL(imageBlob);
-                    imgReader.onloadend = () => {
-                        let imgElt = document.getElementById("coral-micro-camera-image")
-                        imgElt.src = imgReader.result;
-                        imgElt.width = document.getElementById("image-width").value;
-                        imgElt.height = document.getElementById("image-height").value;
-                        let rotation = document.getElementById("image-rotation").value;
-                        imgElt.style.transform = 'rotate(' + rotation.toString() + 'deg)';
-                    };
-                })
-                .catch((reason => {
-                    console.error("Error while fetching image: " + reason.toString());
-                }));
-                await sleep(300);
+        // Update image that waits for filereader to be finished
+        async function updateImage() {
+          const imgReader = new FileReader();
+
+          while (1) {
+            try {
+              let imageBlob = await fetch(imgUrl).then(resp => resp.blob());
+              imgReader.readAsDataURL(imageBlob);
+            } catch (reason) {
+              console.error("Error while fetching image: " + reason.toString());
             }
+          
+            // Wait for FileReader to finish
+            await new Promise((resolve) => {
+              imgReader.onloadend = () => {
+                let imgElt = document.getElementById("coral-micro-camera-image");
+                imgElt.src = imgReader.result;
+                imgElt.width = document.getElementById("image-width").value;
+                imgElt.height = document.getElementById("image-height").value;
+                let rotation = document.getElementById("image-rotation").value;
+                imgElt.style.transform = 'rotate(' + rotation.toString() + 'deg)';
+              
+                resolve(); // Resolve the promise when FileReader is done
+              };
+            });
+          }
         }
         
         // Call createGrid on page load
