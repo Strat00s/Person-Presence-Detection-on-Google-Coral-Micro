@@ -13,10 +13,18 @@
 # limitations under the License.
 
 
-set(CAMERA_STREAMING_LINK_LIBRARIES
+
+set(BASE_LIBRARIES
     libs_base-m7_freertos
-    libs_base-m7_http_server
+)
+
+set(CAMERA_LIBRARIES
     libs_jpeg_m7
+)
+
+set(STREAMING_LIBRARIES
+    libs_base-m7_http_server
+    libs_base-m7_ethernet
 )
 
 # USB
@@ -29,5 +37,7 @@ add_executable_m7(my_project
 
 target_link_libraries(my_project
     libs_base-m7_freertos
-    ${CAMERA_STREAMING_LINK_LIBRARIES}
+    ${BASE_LIBRARIES}
+    ${CAMERA_LIBRARIES}
+    ${STREAMING_LIBRARIES}
 )

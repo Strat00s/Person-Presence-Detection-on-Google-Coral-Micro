@@ -30,6 +30,12 @@
 #include "libs/tensorflow/detection.h"
 #include "libs/tpu/edgetpu_op.h"
 
+#include "libs/base/ethernet.h"
+#include "third_party/nxp/rt1176-sdk/middleware/lwip/src/include/lwip/dns.h"
+#include "third_party/nxp/rt1176-sdk/middleware/lwip/src/include/lwip/tcpip.h"
+#include "libs/base/check.h"
+//#include "x86_64-linux-gnu/sys/time.h"
+
 
 using namespace coralmicro;
 using namespace std;
@@ -297,8 +303,6 @@ HttpServer::Content UriHandler(const char* uri) {
 void onPostFinished(payload_uri_t payload_uri) {
     printf("on post finished\r\n");
 
-    //handle only valid posts
-    //more valid addresses can be added here
     if (StrEndsWith(payload_uri.uri, SAVE_MASK_PATH)) {
         if (payload_uri.payload.size() <= 0) {
             printf("Invalid payload size");
@@ -306,7 +310,6 @@ void onPostFinished(payload_uri_t payload_uri) {
         }
 
         //TODO I am currently expecting the payload to be in valid format
-        //Get mask dimension from payload (csv)
         auto i = find(payload_uri.payload.begin(), payload_uri.payload.end(), ',');
         int start = 0;
         int end = i - payload_uri.payload.begin();
@@ -319,13 +322,11 @@ void onPostFinished(payload_uri_t payload_uri) {
 
         start = end + 1;
 
-        //clear mask, reserver enough space for new mask and copy mask
         image_mask.grid.clear();
         image_mask.grid.reserve(image_mask.height * image_mask.width);
         for (int i = 0; i < image_mask.height * image_mask.width; i++)
             image_mask.grid.push_back(payload_uri.payload[start + i] - '0');
 
-        //print the mask (for debuging)
         printf("Width: %u\r\n", image_mask.width);
         printf("Heigth: %u\r\n", image_mask.height);
         printf("Data: ");
@@ -345,6 +346,35 @@ extern "C" void app_main(void* param) {
 
     LedSet(Led::kStatus, true);
     printf("Bodypix test\r\n");
+
+
+    // Try and get an IP
+    std::optional<std::string> our_ip_addr;
+    printf("Attempting to use ethernet...\r\n");
+    CHECK(EthernetInit(true));
+    our_ip_addr = EthernetGetIp();
+
+    if (our_ip_addr.has_value()) {
+        printf("DHCP succeeded, our IP is %s.\r\n", our_ip_addr.value().c_str());
+    } else {
+        printf("We didn't get an IP via DHCP, not progressing further.\r\n");
+        return;
+    }
+
+    // Wait for the clock to be set via NTP.
+    //struct timeval tv;
+    //int gettimeofday_retries = 10;
+    //do {
+    //    if (gettimeofday(&tv, nullptr) == 0) {
+    //        break;
+    //    }
+    //    gettimeofday_retries--;
+    //    vTaskDelay(pdMS_TO_TICKS(1000));
+    //} while (gettimeofday_retries);
+    //if (!gettimeofday_retries) {
+    //    printf("Clock was never set via NTP.\r\n");
+    //    return;
+    //}
 
 
     //initialize default mask
@@ -397,13 +427,14 @@ extern "C" void app_main(void* param) {
     CameraTask::GetSingleton()->SetPower(true);
     CameraTask::GetSingleton()->Enable(CameraMode::kStreaming);
 
-    std::string usb_ip;
-    if (GetUsbIpAddress(&usb_ip))
-        printf("Serving on: http://%s\r\n", usb_ip.c_str());
-    else {
-        printf("Failed to start webserver/ethernet adapter!");
-        vTaskSuspend(nullptr);
-    }
+
+    //std::string usb_ip;
+    //if (GetUsbIpAddress(&usb_ip))
+    //    printf("Serving on: http://%s\r\n", usb_ip.c_str());
+    //else {
+    //    printf("Failed to start webserver/ethernet adapter!");
+    //    vTaskSuspend(nullptr);
+    //}
 
     PostHttpServer http_server;
     http_server.addPostPath(SAVE_MASK_PATH);
