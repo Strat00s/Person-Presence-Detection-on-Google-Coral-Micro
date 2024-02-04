@@ -10,7 +10,6 @@
 
 #include "libs/base/timer.h"
 #include "libs/base/http_server.h"
-#include "apps/camera_testing/libs/http_server.h"
 #include "libs/base/led.h"
 #include "libs/base/strings.h"
 #include "libs/base/utils.h"
@@ -36,6 +35,7 @@
 #include "libs/base/check.h"
 //#include "x86_64-linux-gnu/sys/time.h"
 
+#include "local_libs/http_server.h"
 
 using namespace coralmicro;
 using namespace std;
