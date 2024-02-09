@@ -1,9 +1,51 @@
-//draw green line from corner to corner
-//for (int i = 0; i < CameraTask::kWidth * 3; i += 3) {
-//    buf[i     + i * CameraTask::kWidth] = 0;
-//    buf[i + 1 + i * CameraTask::kWidth] = 255;
-//    buf[i + 2 + i * CameraTask::kWidth] = 0;
-//}
+/** YOLO tensor data extraction
+auto tensor = interpreter->output_tensor(0);
+//printf("Outputs size: %d\n", interpreter->outputs_size());
+//printf("Dimensions: %d\n", tensor->dims->size);
+//printf("size: %d %d %d\n", tensor->dims->data[0], tensor->dims->data[1], tensor->dims->data[2]);
+//printf("type: %d\n", tensor->type);
+int box_cnt = tensor->dims->data[1];
+int info_cnt = tensor->dims->data[2];
+auto tensor_data = tflite::GetTensorData<uint8_t>(tensor);
+
+//std::vector<tensorflow::Object> results;
+results.clear();
+float scale = 0.005149809643626213f;
+int zero_point = 4;
+for (int i = 0; i < box_cnt; i++) {
+    float score = (tensor_data[i * info_cnt + 4] - zero_point) * scale;
+    if (score < 0.5)
+        continue;
+    score = (tensor_data[i * info_cnt + 5] - zero_point) * scale;
+    float max_score = (*std::max_element(tensor_data + i * info_cnt + 5, tensor_data + i * info_cnt + 5 + 80) - zero_point) * scale;
+    if (score < max_score)
+        continue;
+    int id = 0;
+    printf("%d %d %d %d\n", tensor_data[i * info_cnt], tensor_data[i * info_cnt + 1], tensor_data[i * info_cnt+ 2], tensor_data[i * info_cnt+3]);
+    float bx = (tensor_data[i * info_cnt] - zero_point) * scale;
+    float by = (tensor_data[i * info_cnt + 1] - zero_point) * scale;
+    float bw = (tensor_data[i * info_cnt + 2]) * scale; // width and height should not have zero_point subtracted
+    float bh = (tensor_data[i * info_cnt + 3]) * scale; // before the division by 2
+
+    // Convert from center coordinates to top-left and bottom-right coordinates
+    float x1 = (bx - bw / 2.0f);
+    float y1 = (by - bh / 2.0f);
+    float x2 = (bx + bw / 2.0f);
+    float y2 = (by + bh / 2.0f);
+    results.push_back(
+        tensorflow::Object{
+            .id = id,
+            .score = score,
+            .bbox = {
+                .ymin = y1,
+                .xmin = x1,
+                .ymax = y2,
+                .xmax = x2
+            }
+        }
+    );
+}
+*/
 
 #include <cstdio>
 #include <vector>
@@ -46,20 +88,18 @@ using namespace std;
 #define LOAD_MASK_PATH  "/load_mask"
 #define SAVE_MASK_PATH  "/save_mask"
 
-#define MODEL_PATH "/models/tf2_ssd_mobilenet_v2_coco17_ptq_edgetpu.tflite"
+#define MODEL_PATH "/models/my_models/ssdlite_mobiledet_coco_qat_postprocess_edgetpu.tflite"
+
 
 #define TENSOR_ARENA_SIZE     8 * 1024 * 1024
 #define CONFIDENCE_THRESHOLD  0.5f
 #define LOW_CONFIDENCE_RESULT -2
 
-#define IMG_WIDTH  320
-#define IMG_HEIGHT 320
+//#define IMG_WIDTH  320
+//#define IMG_HEIGHT 320
 
 
 STATIC_TENSOR_ARENA_IN_SDRAM(tensor_arena, TENSOR_ARENA_SIZE);
-
-tflite::MicroMutableOpResolver<3> resolver;
-tflite::MicroInterpreter *interpreter;
 
 
 struct mask_struct {
@@ -209,85 +249,186 @@ bool isMasked(int x_min, int x_max, int y_min, int y_max, const std::vector<uint
 }
 
 
-vector<uint8_t> captureImage(int width, int height, CameraFormat format) {
-    std::vector<uint8_t> image(width * height * CameraFormatBpp(format));
+tflite::MicroMutableOpResolver<3> resolver;
+tflite::MicroInterpreter *interpreter;
+tflite::MicroErrorReporter error_reporter;
 
-    //create camera frame
-    auto fmt = CameraFrameFormat{
-        format,
-        CameraFilterMethod::kBilinear,
+std::vector<uint8_t> image;
+CameraFrameFormat frame;
+int width;
+int height;
+
+SemaphoreHandle_t det_mutex;
+SemaphoreHandle_t img_mutex;
+SemaphoreHandle_t res_mutex;
+int status;
+
+TaskHandle_t detect_task_handle;
+
+std::vector<tensorflow::Object> results;
+
+//takes about 106-108ms
+static void detectTask(void *args) {
+    TickType_t freq = 50;
+    TickType_t prev = xTaskGetTickCount();
+    status = 0;
+
+    while (true) {
+        //vTaskDelayUntil(&prev, freq);
+        int ticks = xTaskGetTickCount();
+
+        // get frame
+        int ret;
+        if (xSemaphoreTake(img_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            ret = CameraTask::GetSingleton()->GetFrame({frame});
+            xSemaphoreGive(img_mutex);
+        }
+        else {
+            printf("failed to acquire img mutex\n");
+            continue;
+        }
+
+        if (!ret) {
+            printf("Failed to get image from camera.\r\n");
+            if (xSemaphoreTake(det_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                status = -1;
+                xSemaphoreGive(det_mutex);
+            }
+            else
+                printf("failed to acquire det mutex\n");
+            continue;
+        }
+
+        //copy image data to tensor
+        if (xSemaphoreTake(img_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            std::memcpy(tflite::GetTensorData<int8_t>(interpreter->input_tensor(0)), image.data(), image.size());
+            xSemaphoreGive(img_mutex);
+        }
+        else {
+            printf("failed to acquire img mutex\n");
+            continue;
+        }
+
+
+        // run model
+        if (interpreter->Invoke() != kTfLiteOk) {
+            printf("Invoke failed\r\n");
+            if (xSemaphoreTake(det_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                status = -2;
+                xSemaphoreGive(det_mutex);
+            }
+            else
+                printf("failed to acquire det mutex\n");
+            continue;
+        }
+
+        // get results and remove anything that is not a person
+        int obj_cnt = 0;
+        if (xSemaphoreTake(res_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            results = tensorflow::GetDetectionResults(interpreter, 0.65);
+            auto new_end = std::remove_if(results.begin(), results.end(), [](tensorflow::Object item) {
+                return item.id != 0;
+            });
+            results.erase(new_end, results.end());
+
+            //obj_cnt = results.size();
+            printf("%d objects\n", obj_cnt);
+            xSemaphoreGive(res_mutex);
+        }
+        else {
+            printf("failed to acquire res mutex\n");
+            continue;
+        }
+
+        //printf("%d person objects\n", obj_cnt);
+        if (xSemaphoreTake(det_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            status = obj_cnt;
+            xSemaphoreGive(det_mutex);
+        }
+        else
+            printf("failed to acquire det mutex\n");
+        
+        printf("total: %d\n", xTaskGetTickCount() - ticks);
+    }
+}
+
+void setup() {
+    det_mutex = xSemaphoreCreateMutex();
+    img_mutex = xSemaphoreCreateMutex();
+    res_mutex = xSemaphoreCreateMutex();
+
+    auto* input_tensor = interpreter->input_tensor(0);
+    height  = input_tensor->dims->data[1];
+    width   = input_tensor->dims->data[2];
+
+    printf("%d %d\n", width, height);
+    
+    // create and save image storages
+    image.resize(width * height * CameraFormatBpp(CameraFormat::kRgb), 0);
+
+    printf("%d\n", image.capacity());
+
+    // create frames for model and preview image
+    frame = CameraFrameFormat{
+        CameraFormat::kRgb,
+        CameraFilterMethod::kNearestNeighbor,
         CameraRotation::k270,
         width,
         height,
-        false,
-        image.data()
+        true,
+        image.data(),
+        true
     };
-
-    if (!CameraTask::GetSingleton()->GetFrame({fmt})) {
-        printf("Failed to get image from camera.\r\n");
-        return vector<uint8_t>();
-    }
-
-    //printf("Frame %ld\r\n", frame_num++);
-
-    return image;
 }
-
 
 HttpServer::Content UriHandler(const char* uri) {
     if (StrEndsWith(uri, "index.shtml") || StrEndsWith(uri, "coral_micro_camera.html"))
         return std::string(INDEX_FILE_NAME);
     
     else if (StrEndsWith(uri, STREAM_PATH)) {
-        //get input tensor dimensions
-        auto* input_tensor = interpreter->input(0);
-        auto model_height  = input_tensor->dims->data[1];
-        auto model_width   = input_tensor->dims->data[2];
-
-        auto image = captureImage(model_width, model_height, CameraFormat::kRgb);
-        if (image.size() == 0)
-            return {};
-
-
-        //copy image data to tensor
-        std::memcpy(tflite::GetTensorData<uint8_t>(input_tensor), image.data(), image.size());
-
-        if (interpreter->Invoke() != kTfLiteOk) {
-            printf("Invoke failed\r\n");
-            return {};
+        // get status
+        if (xSemaphoreTake(det_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            printf("Status: %d\n", status);
+            xSemaphoreGive(det_mutex);
         }
+        else
+            printf("failed to acquire det mutex\n");
 
-        //get 5 results
-        std::vector<tensorflow::Object> results = tensorflow::GetDetectionResults(interpreter, 0.5);
-        if (results.empty()) {
-            printf("Nothing detected (below confidence threshold)\r\n");
-            return {};
+        // get image copy
+        std::vector<uint8_t> img_copy;
+        if (xSemaphoreTake(img_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            img_copy = image;
+            xSemaphoreGive(img_mutex);
         }
-        //printf("Number of objects: %d \r\n", results.size());
-        //printf("%s\r\n", tensorflow::FormatDetectionOutput(results).c_str());
-        
-        //draw bounding box around first person
-        //TODO measure distance between current and last box to remove false detections (too fast movement and such)
-        for (size_t i = 0; i < results.size(); i++) {
-            //search for person in results
-            if (results[i].id == 0) {
-                int x_min = results[i].bbox.xmin * model_width;
-                int x_max = results[i].bbox.xmax * model_width;
-                int y_min = results[i].bbox.ymin * model_height;
-                int y_max = results[i].bbox.ymax * model_height;
+        else
+            printf("failed to get img mutex\n");
 
-                if (isMasked(x_min, x_max, y_min, y_max, image_mask.grid)) {
-                    printf("Masked\r\n");
-                    continue;
-                }
-                drawRectangle(y_min, y_max, x_min, x_max, &image, model_width, model_height);
-                printf("Not masked\r\n");
-                break;
+        // get result copy
+        std::vector<tensorflow::Object> res_copy;
+        if (xSemaphoreTake(res_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            res_copy = results;
+            xSemaphoreGive(res_mutex);
+        }
+        else
+            printf("failed to get res mutex\n");
+
+
+        for (auto result : res_copy) {
+            //printf("%f %f %f %f\n", result.bbox.xmin, result.bbox.xmax, result.bbox.ymin, result.bbox.ymax);
+            int x_min = result.bbox.xmin * width;
+            int x_max = result.bbox.xmax * width;
+            int y_min = result.bbox.ymin * height;
+            int y_max = result.bbox.ymax * height;
+
+            if (isMasked(x_min, x_max, y_min, y_max, image_mask.grid)) {
+                drawRectangle(y_min, y_max, x_min, x_max, &img_copy, width, height, 0, 0, 255);
             }
+            else
+                drawRectangle(y_min, y_max, x_min, x_max, &img_copy, width, height, 0, 255, 0);
         }
 
         std::vector<uint8_t> jpeg;
-        JpegCompressRgb(image.data(), model_width, model_height, 75, &jpeg);
+        JpegCompressRgb(img_copy.data(), width, height, 100, &jpeg);
         return jpeg;
     }
     else if (StrEndsWith(uri, LOAD_MASK_PATH)) {
@@ -342,13 +483,8 @@ void onPostFinished(payload_uri_t payload_uri) {
 
 extern "C" void app_main(void* param) {
     (void)param;
-    TimerInit();
-    auto idk = TimerMicros();
-
 
     LedSet(Led::kStatus, true);
-    printf("Bodypix test\r\n");
-
 
     // Try and get an IP
     std::optional<std::string> our_ip_addr;
@@ -362,22 +498,6 @@ extern "C" void app_main(void* param) {
         printf("We didn't get an IP via DHCP, not progressing further.\r\n");
         return;
     }
-
-    // Wait for the clock to be set via NTP.
-    //struct timeval tv;
-    //int gettimeofday_retries = 10;
-    //do {
-    //    if (gettimeofday(&tv, nullptr) == 0) {
-    //        break;
-    //    }
-    //    gettimeofday_retries--;
-    //    vTaskDelay(pdMS_TO_TICKS(1000));
-    //} while (gettimeofday_retries);
-    //if (!gettimeofday_retries) {
-    //    printf("Clock was never set via NTP.\r\n");
-    //    return;
-    //}
-
 
     //initialize default mask
     image_mask.height = 32;
@@ -429,22 +549,15 @@ extern "C" void app_main(void* param) {
     CameraTask::GetSingleton()->SetPower(true);
     CameraTask::GetSingleton()->Enable(CameraMode::kStreaming);
 
+    setup();
 
-    //std::string usb_ip;
-    //if (GetUsbIpAddress(&usb_ip))
-    //    printf("Serving on: http://%s\r\n", usb_ip.c_str());
-    //else {
-    //    printf("Failed to start webserver/ethernet adapter!");
-    //    vTaskSuspend(nullptr);
-    //}
+    xTaskCreate(detectTask, "detect", 0x4000, nullptr, 0, &detect_task_handle);
 
     PostHttpServer http_server;
     http_server.addPostPath(SAVE_MASK_PATH);
     http_server.registerPostFinishedCallback(onPostFinished);
     http_server.AddUriHandler(UriHandler);
     UseHttpServer(&http_server);
-
-    printf("END: %llu\r\n", TimerMicros() - idk);
 
     vTaskSuspend(nullptr);
 }
