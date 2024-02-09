@@ -19,3 +19,16 @@ TPU is probably connected through USB -> sending large amount of data leads to U
 USB HTTP Server is lows and misses
 
 270 rotation is camera up, port down.
+
+## Time
+Capturing an image takes about 30ms
+inference takes by far the longest. And it all depends on the model (obviously). But since I can't see into the custom edge tpu operator, I don't know how complex the mdoels are.
+
+Pretty much anything else (except for drawing on the image) is relatively quick.
+NMS adds practically no delay.
+My guess is that tracking will also consume minimum cpu time
+
+Drawing is slow (obviously). My guess is that context switching and everything adds about 50ms when displaying a single image.
+Since drawing onto the image and displaying the webpage takes the longest, I want to move it to the M4 core and have low FPS for preview, while leaving M7 to run inference with the edge tpu (M4 does not have access to the tpu anyways).
+
+TLDR: optimization is a must. But first.

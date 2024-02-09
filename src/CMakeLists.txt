@@ -32,7 +32,7 @@ add_executable_m7(my_project
     main.cc
     DATA
     ${CMAKE_CURRENT_SOURCE_DIR}/web/coral_micro_camera.html>/coral_micro_camera.html
-    ${PROJECT_SOURCE_DIR}/models/tf2_ssd_mobilenet_v2_coco17_ptq_edgetpu.tflite
+    ${PROJECT_SOURCE_DIR}/models/my_models/tf2_ssd_mobilenet_v2_coco17_ptq_edgetpu.tflite
 )
 
 target_link_libraries(my_project

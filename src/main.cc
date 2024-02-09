@@ -49,6 +49,10 @@ for (int i = 0; i < box_cnt; i++) {
 
 #include <cstdio>
 #include <vector>
+#include <numeric>
+#include <algorithm>
+#include <deque>
+#include <cmath>
 
 #include "libs/base/timer.h"
 #include "libs/base/http_server.h"
@@ -88,15 +92,13 @@ using namespace std;
 #define LOAD_MASK_PATH  "/load_mask"
 #define SAVE_MASK_PATH  "/save_mask"
 
-#define MODEL_PATH "/models/my_models/ssdlite_mobiledet_coco_qat_postprocess_edgetpu.tflite"
+#define MODEL_PATH "/models/my_models/tf2_ssd_mobilenet_v2_coco17_ptq_edgetpu.tflite"
 
 
 #define TENSOR_ARENA_SIZE     8 * 1024 * 1024
 #define CONFIDENCE_THRESHOLD  0.5f
 #define LOW_CONFIDENCE_RESULT -2
 
-//#define IMG_WIDTH  320
-//#define IMG_HEIGHT 320
 
 
 STATIC_TENSOR_ARENA_IN_SDRAM(tensor_arena, TENSOR_ARENA_SIZE);
@@ -159,6 +161,49 @@ void drawRectangle(int y_min, int y_max, int x_min, int x_max, std::vector<uint8
     drawHorizontalLine(y_max, x_min, x_max, image, width, height, r, g, b);
     drawVerticalLine(x_min, y_min, y_max, image, width, height, r, g, b);
     drawVerticalLine(x_max, y_min, y_max, image, width, height, r, g, b);
+}
+
+void drawRectangle(std::vector<unsigned char>& image, int width, int height, int xmin, int ymin, int xmax, int ymax, const std::vector<unsigned char>& color) {
+    // Ensure color vector has exactly 3 elements (RGB).
+    if (color.size() != 3) return;
+
+    // Top and bottom edges.
+    for (int x = xmin; x <= xmax; x++) {
+        // Top edge
+        if (ymin >= 0 && ymin < height && x >= 0 && x < width) {
+            int topIndex = (ymin * width + x) * 3;
+            image[topIndex] = color[0];     // R
+            image[topIndex + 1] = color[1]; // G
+            image[topIndex + 2] = color[2]; // B
+        }
+        
+        // Bottom edge
+        if (ymax >= 0 && ymax < height && x >= 0 && x < width) {
+            int bottomIndex = (ymax * width + x) * 3;
+            image[bottomIndex] = color[0];     // R
+            image[bottomIndex + 1] = color[1]; // G
+            image[bottomIndex + 2] = color[2]; // B
+        }
+    }
+
+    // Left and right edges.
+    for (int y = ymin; y <= ymax; y++) {
+        // Left edge
+        if (xmin >= 0 && xmin < width && y >= 0 && y < height) {
+            int leftIndex = (y * width + xmin) * 3;
+            image[leftIndex] = color[0];     // R
+            image[leftIndex + 1] = color[1]; // G
+            image[leftIndex + 2] = color[2]; // B
+        }
+        
+        // Right edge
+        if (xmax >= 0 && xmax < width && y >= 0 && y < height) {
+            int rightIndex = (y * width + xmax) * 3;
+            image[rightIndex] = color[0];     // R
+            image[rightIndex + 1] = color[1]; // G
+            image[rightIndex + 2] = color[2]; // B
+        }
+    }
 }
 
 
@@ -258,14 +303,117 @@ CameraFrameFormat frame;
 int width;
 int height;
 
-SemaphoreHandle_t det_mutex;
-SemaphoreHandle_t img_mutex;
-SemaphoreHandle_t res_mutex;
+SemaphoreHandle_t status_mux;
+SemaphoreHandle_t image_mux;
+SemaphoreHandle_t result_mux;
 int status;
+float threshold     = 0.5f;
+float iou_threshold = 0.25f;
 
 TaskHandle_t detect_task_handle;
 
-std::vector<tensorflow::Object> results;
+
+typedef struct {
+    float ymin;
+    float xmin;
+    float ymax;
+    float xmax;
+    float score;
+} bbox_t;
+std::vector<bbox_t> results;
+//std::vector<tensorflow::Object> results;
+
+//float IoU(const tensorflow::BBox<float>& a, const tensorflow::BBox<float>& b) {
+float IoU(const bbox_t& a, const bbox_t& b) {
+    float intersectionArea = std::max(0.0f, std::min(a.xmax, b.xmax) - std::max(a.xmin, b.xmin)) *
+                             std::max(0.0f, std::min(a.ymax, b.ymax) - std::max(a.ymin, b.ymin));
+    float unionArea = (a.xmax - a.xmin) * (a.ymax - a.ymin) +
+                      (b.xmax - b.xmin) * (b.ymax - b.ymin) - intersectionArea;
+    return intersectionArea / unionArea;
+}
+
+//std::vector<tensorflow::Object> getResults(tflite::MicroInterpreter *interpreter, float threshold, float iou_threshold) {
+std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, float threshold, float iou_threshold) {
+    float *bboxes, *ids, *scores, *count;
+    if (interpreter->output_tensor(2)->dims->size == 1) {
+        scores = tflite::GetTensorData<float>(interpreter->output_tensor(0));
+        bboxes = tflite::GetTensorData<float>(interpreter->output_tensor(1));
+        count  = tflite::GetTensorData<float>(interpreter->output_tensor(2));
+        ids    = tflite::GetTensorData<float>(interpreter->output_tensor(3));
+    }
+    else {
+        bboxes = tflite::GetTensorData<float>(interpreter->output_tensor(0));
+        ids    = tflite::GetTensorData<float>(interpreter->output_tensor(1));
+        scores = tflite::GetTensorData<float>(interpreter->output_tensor(2));
+        count  = tflite::GetTensorData<float>(interpreter->output_tensor(3));
+    }
+
+    size_t cnt = static_cast<size_t>(count[0]);
+    std::vector<bbox_t> tmp_results, results;
+    for (size_t i = 0; i < cnt; ++i) {
+        // skip non-person objects (should be good enough)
+        if ((int)std::round(ids[i]))
+            continue;
+
+        if (scores[i] < threshold)
+            continue;
+
+        tmp_results.push_back({
+            .ymin  = std::max(0.0f, bboxes[4 * i]),
+            .xmin  = std::max(0.0f, bboxes[4 * i + 1]),
+            .ymax  = std::max(0.0f, bboxes[4 * i + 2]),
+            .xmax  = std::max(0.0f, bboxes[4 * i + 3]),
+            .score = scores[i]
+        });
+    }
+
+    //std::vector<tensorflow::Object> tmp_results, results;
+    //tmp_results = tensorflow::GetDetectionResults(interpreter, threshold);
+    //auto new_end = std::remove_if(tmp_results.begin(), tmp_results.end(), [](tensorflow::Object item) {
+    //    return item.id != 0;
+    //});
+    //tmp_results.erase(new_end, tmp_results.end());
+
+    // nothing to sort with single result
+    if (tmp_results.size() <= 1)
+        return tmp_results;
+
+    // order indices to the tmp_results from lowest to highest scores (highest at back)
+    std::vector<int> indices(tmp_results.size());
+    std::iota(indices.begin(), indices.end(), 0);
+    std::sort(indices.begin(), indices.end(), [&](int lhs, int rhs) {
+        return tmp_results[lhs].score > tmp_results[rhs].score;
+    });
+
+    // non-maximum suppresion
+    while (!indices.empty()) {
+        int idx = indices.front();
+        indices.erase(indices.begin());
+        auto current_box = tmp_results[idx];
+        results.push_back(current_box);
+
+        // go through remaining box and check if there are any that overlap with the current box and have lower score
+        for (auto it = indices.begin(); it != indices.end(); ) {
+            //if (IoU(current_box.bbox, tmp_results[*it].bbox) > iou_threshold)
+            if (IoU(current_box, tmp_results[*it]) > iou_threshold)
+                it = indices.erase(it);
+            else
+                it++;
+        }
+    }
+
+    printf("Total results vs final: %d vs %d\n", tmp_results.size(), results.size());
+    return results;
+}
+
+void setStatus(int s) {
+    if (xSemaphoreTake(status_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
+        status = s;
+        xSemaphoreGive(status_mux);
+    }
+    else
+        printf("failed to acquire det mutex\n");
+}
 
 //takes about 106-108ms
 static void detectTask(void *args) {
@@ -279,9 +427,9 @@ static void detectTask(void *args) {
 
         // get frame
         int ret;
-        if (xSemaphoreTake(img_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (xSemaphoreTake(image_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
             ret = CameraTask::GetSingleton()->GetFrame({frame});
-            xSemaphoreGive(img_mutex);
+            xSemaphoreGive(image_mux);
         }
         else {
             printf("failed to acquire img mutex\n");
@@ -290,19 +438,14 @@ static void detectTask(void *args) {
 
         if (!ret) {
             printf("Failed to get image from camera.\r\n");
-            if (xSemaphoreTake(det_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                status = -1;
-                xSemaphoreGive(det_mutex);
-            }
-            else
-                printf("failed to acquire det mutex\n");
+            setStatus(-1);
             continue;
         }
 
         //copy image data to tensor
-        if (xSemaphoreTake(img_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (xSemaphoreTake(image_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
             std::memcpy(tflite::GetTensorData<int8_t>(interpreter->input_tensor(0)), image.data(), image.size());
-            xSemaphoreGive(img_mutex);
+            xSemaphoreGive(image_mux);
         }
         else {
             printf("failed to acquire img mutex\n");
@@ -313,27 +456,29 @@ static void detectTask(void *args) {
         // run model
         if (interpreter->Invoke() != kTfLiteOk) {
             printf("Invoke failed\r\n");
-            if (xSemaphoreTake(det_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                status = -2;
-                xSemaphoreGive(det_mutex);
-            }
-            else
-                printf("failed to acquire det mutex\n");
+            setStatus(-2);
             continue;
+        }
+
+        if (interpreter->outputs().size() != 4) {
+            printf("Output size mismatch\r\n");
+            setStatus(-3);
+            continue ;
         }
 
         // get results and remove anything that is not a person
         int obj_cnt = 0;
-        if (xSemaphoreTake(res_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            results = tensorflow::GetDetectionResults(interpreter, 0.65);
-            auto new_end = std::remove_if(results.begin(), results.end(), [](tensorflow::Object item) {
-                return item.id != 0;
-            });
-            results.erase(new_end, results.end());
+        if (xSemaphoreTake(result_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
+            results = getResults(interpreter, threshold, iou_threshold);
+            //results = tensorflow::GetDetectionResults(interpreter, threshold);
+            //auto new_end = std::remove_if(results.begin(), results.end(), [](tensorflow::Object item) {
+            //    return item.id != 0;
+            //});
+            //results.erase(new_end, results.end());
 
-            //obj_cnt = results.size();
+            obj_cnt = results.size();
             printf("%d objects\n", obj_cnt);
-            xSemaphoreGive(res_mutex);
+            xSemaphoreGive(result_mux);
         }
         else {
             printf("failed to acquire res mutex\n");
@@ -341,9 +486,9 @@ static void detectTask(void *args) {
         }
 
         //printf("%d person objects\n", obj_cnt);
-        if (xSemaphoreTake(det_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (xSemaphoreTake(status_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
             status = obj_cnt;
-            xSemaphoreGive(det_mutex);
+            xSemaphoreGive(status_mux);
         }
         else
             printf("failed to acquire det mutex\n");
@@ -353,9 +498,9 @@ static void detectTask(void *args) {
 }
 
 void setup() {
-    det_mutex = xSemaphoreCreateMutex();
-    img_mutex = xSemaphoreCreateMutex();
-    res_mutex = xSemaphoreCreateMutex();
+    status_mux = xSemaphoreCreateMutex();
+    image_mux = xSemaphoreCreateMutex();
+    result_mux = xSemaphoreCreateMutex();
 
     auto* input_tensor = interpreter->input_tensor(0);
     height  = input_tensor->dims->data[1];
@@ -387,27 +532,28 @@ HttpServer::Content UriHandler(const char* uri) {
     
     else if (StrEndsWith(uri, STREAM_PATH)) {
         // get status
-        if (xSemaphoreTake(det_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (xSemaphoreTake(status_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
             printf("Status: %d\n", status);
-            xSemaphoreGive(det_mutex);
+            xSemaphoreGive(status_mux);
         }
         else
             printf("failed to acquire det mutex\n");
 
         // get image copy
         std::vector<uint8_t> img_copy;
-        if (xSemaphoreTake(img_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (xSemaphoreTake(image_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
             img_copy = image;
-            xSemaphoreGive(img_mutex);
+            xSemaphoreGive(image_mux);
         }
         else
             printf("failed to get img mutex\n");
 
         // get result copy
-        std::vector<tensorflow::Object> res_copy;
-        if (xSemaphoreTake(res_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        //std::vector<tensorflow::Object> res_copy;
+        std::vector<bbox_t> res_copy;
+        if (xSemaphoreTake(result_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
             res_copy = results;
-            xSemaphoreGive(res_mutex);
+            xSemaphoreGive(result_mux);
         }
         else
             printf("failed to get res mutex\n");
@@ -415,16 +561,18 @@ HttpServer::Content UriHandler(const char* uri) {
 
         for (auto result : res_copy) {
             //printf("%f %f %f %f\n", result.bbox.xmin, result.bbox.xmax, result.bbox.ymin, result.bbox.ymax);
-            int x_min = result.bbox.xmin * width;
-            int x_max = result.bbox.xmax * width;
-            int y_min = result.bbox.ymin * height;
-            int y_max = result.bbox.ymax * height;
+            int xmin = result.xmin * width;
+            int xmax = result.xmax * width;
+            int ymin = result.ymin * height;
+            int ymax = result.ymax * height;
 
-            if (isMasked(x_min, x_max, y_min, y_max, image_mask.grid)) {
-                drawRectangle(y_min, y_max, x_min, x_max, &img_copy, width, height, 0, 0, 255);
+            if (isMasked(xmin, xmax, ymin, ymax, image_mask.grid)) {
+                drawRectangle(ymin, ymax, xmin, xmax, &img_copy, width, height, 0, 0, 255);
+                //drawRectangle(img_copy, width, height, xmin, ymin, xmax, ymax, {0, 0, 255});
             }
             else
-                drawRectangle(y_min, y_max, x_min, x_max, &img_copy, width, height, 0, 255, 0);
+                drawRectangle(ymin, ymax, xmin, xmax, &img_copy, width, height, 0, 255, 0);
+                //drawRectangle(img_copy, width, height, xmin, ymin, xmax, ymax, {0, 255, 0});
         }
 
         std::vector<uint8_t> jpeg;
