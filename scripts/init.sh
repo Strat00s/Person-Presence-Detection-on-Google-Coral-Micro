@@ -1,28 +1,17 @@
 #!/bin/bash
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+
+cd $SCRIPT_DIR/..
 git clone --recurse-submodules -j8 https://github.com/google-coral/coralmicro
 
+# copy the source
+cp -r src coralmicro/apps/my_project
 
-## Taken from https://coral.ai/docs/dev-board-micro/freertos/#create-an-in-tree-project
-cd coralmicro
+# add cmake target
+echo "add_subdirectory(my_project)" >> coralmicro/apps/CMakeLists.txt
 
-# Copy the "hello world" code
-cp -r examples/hello_world apps/my_project
+# set working hidapi version
+sed -i 's/^hidapi==.*$/hidapi==0.11.2/' coralmicro/scripts/requirements.txt
 
-# Rename the executable
-mv apps/my_project/hello_world.cc apps/my_project/main.cc
-
-
-#add_executable_m7(my_project
-#    main.cc
-#)
-#
-#target_link_libraries(my_project
-#    libs_base-m7_freertos
-#)
-
-#add_subdirectory(my_project)
-
-#change hidapi version
-#hidapi==0.11.2
-
-#bash setup.sh
+# run the setup
+setup.sh
