@@ -307,10 +307,15 @@ SemaphoreHandle_t status_mux;
 SemaphoreHandle_t image_mux;
 SemaphoreHandle_t result_mux;
 int status;
+
 float threshold     = 0.5f;
 float iou_threshold = 0.25f;
 
-TaskHandle_t detect_task_handle;
+TaskHandle_t detect_task_handle; // detector task handle
+
+std::vector<uint8_t> last_frame; // last empty frame before any detection happens
+//std::deque<std::vector<uint8_t>>
+int detected = 0;
 
 
 typedef struct {
@@ -322,6 +327,40 @@ typedef struct {
 } bbox_t;
 std::vector<bbox_t> results;
 //std::vector<tensorflow::Object> results;
+
+
+void setStatus(int s) {
+    if (xSemaphoreTake(status_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
+        status = s;
+        xSemaphoreGive(status_mux);
+    }
+    else
+        printf("failed to acquire det mutex\n");
+}
+
+
+#define IDX(x, y, width) (y * width + x) * 3;
+
+// Function to check if the specified region has changed significantly - average color approach
+bool hasChangedAverage(const std::vector<unsigned char>& currentImage, const std::vector<unsigned char>& previousImage, int width, int height, int xmin, int ymin, int xmax, int ymax, int change, float count) {
+    int32_t changed = 0;
+    int32_t pixel_cnt = (xmax - xmin + 1) * (ymax - ymin + 1);
+    for (int y = ymin; y <= ymax; ++y) {
+        for (int x = xmin; x <= xmax; ++x) {
+            size_t index = IDX(x, y, width);
+            int pixel_change = std::abs(currentImage[index] - previousImage[index]) +
+                               std::abs(currentImage[index + 1] - previousImage[index + 1]) +
+                               std::abs(currentImage[index + 2] - previousImage[index + 2]);
+            if (pixel_change > change)
+                changed++;
+        }
+    }
+
+    printf("changed, pixelcnt: %d %d\n", changed, pixel_cnt);
+
+    return changed > (int32_t)std::round(pixel_cnt * count);
+}
+
 
 //float IoU(const tensorflow::BBox<float>& a, const tensorflow::BBox<float>& b) {
 float IoU(const bbox_t& a, const bbox_t& b) {
@@ -348,6 +387,7 @@ std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, float thre
         count  = tflite::GetTensorData<float>(interpreter->output_tensor(3));
     }
 
+    detected = 0;
     size_t cnt = static_cast<size_t>(count[0]);
     std::vector<bbox_t> tmp_results, results;
     for (size_t i = 0; i < cnt; ++i) {
@@ -358,13 +398,16 @@ std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, float thre
         if (scores[i] < threshold)
             continue;
 
-        tmp_results.push_back({
+        detected++;
+
+        bbox_t bbox = {
             .ymin  = std::max(0.0f, bboxes[4 * i]),
             .xmin  = std::max(0.0f, bboxes[4 * i + 1]),
             .ymax  = std::max(0.0f, bboxes[4 * i + 2]),
             .xmax  = std::max(0.0f, bboxes[4 * i + 3]),
             .score = scores[i]
-        });
+        };
+        tmp_results.push_back(bbox);
     }
 
     //std::vector<tensorflow::Object> tmp_results, results;
@@ -378,7 +421,7 @@ std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, float thre
     if (tmp_results.size() <= 1)
         return tmp_results;
 
-    // order indices to the tmp_results from lowest to highest scores (highest at back)
+    // order indices to the tmp_results from highest to lowest scores
     std::vector<int> indices(tmp_results.size());
     std::iota(indices.begin(), indices.end(), 0);
     std::sort(indices.begin(), indices.end(), [&](int lhs, int rhs) {
@@ -390,7 +433,6 @@ std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, float thre
         int idx = indices.front();
         indices.erase(indices.begin());
         auto current_box = tmp_results[idx];
-        results.push_back(current_box);
 
         // go through remaining box and check if there are any that overlap with the current box and have lower score
         for (auto it = indices.begin(); it != indices.end(); ) {
@@ -400,26 +442,41 @@ std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, float thre
             else
                 it++;
         }
+
+        if (xSemaphoreTake(image_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (hasChangedAverage(image, last_frame, width, height, current_box.xmin * width, current_box.ymin * width, current_box.xmax * width, current_box.ymax * width, 100, 0.05f))
+            results.push_back(current_box);
+        else
+            printf("Probably false positive\n");
+            xSemaphoreGive(image_mux);
+        }
+        else {
+            printf("failed to acquire img mutex\n");
+            setStatus(-80);
+            continue;
+        }
     }
 
     printf("Total results vs final: %d vs %d\n", tmp_results.size(), results.size());
     return results;
 }
 
-void setStatus(int s) {
-    if (xSemaphoreTake(status_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
-        status = s;
-        xSemaphoreGive(status_mux);
-    }
-    else
-        printf("failed to acquire det mutex\n");
-}
 
 //takes about 106-108ms
 static void detectTask(void *args) {
     TickType_t freq = 50;
     TickType_t prev = xTaskGetTickCount();
     status = 0;
+    int clean = 0;
+
+    if (xSemaphoreTake(image_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
+        CameraTask::GetSingleton()->GetFrame({frame});
+        last_frame = image;
+        xSemaphoreGive(image_mux);
+    }
+    else {
+        printf("failed to acquire img mutex\n");
+    }
 
     while (true) {
         //vTaskDelayUntil(&prev, freq);
@@ -477,12 +534,28 @@ static void detectTask(void *args) {
             //results.erase(new_end, results.end());
 
             obj_cnt = results.size();
-            printf("%d objects\n", obj_cnt);
             xSemaphoreGive(result_mux);
+            printf("%d objects\n", obj_cnt);
         }
         else {
             printf("failed to acquire res mutex\n");
+            setStatus(-4);
             continue;
+        }
+
+        detected ? clean = 0 : clean++;
+
+        if (!detected && clean >= 10) {
+            if (xSemaphoreTake(image_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
+                last_frame = image;
+                xSemaphoreGive(image_mux);
+            }
+            else {
+                printf("failed to acquire img mutex\n");
+                setStatus(-5);
+                continue;
+            }
+            printf("Last frame updated\n");
         }
 
         //printf("%d person objects\n", obj_cnt);
@@ -516,7 +589,7 @@ void setup() {
     // create frames for model and preview image
     frame = CameraFrameFormat{
         CameraFormat::kRgb,
-        CameraFilterMethod::kNearestNeighbor,
+        CameraFilterMethod::kBilinear,
         CameraRotation::k270,
         width,
         height,
@@ -532,12 +605,12 @@ HttpServer::Content UriHandler(const char* uri) {
     
     else if (StrEndsWith(uri, STREAM_PATH)) {
         // get status
-        if (xSemaphoreTake(status_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
-            printf("Status: %d\n", status);
-            xSemaphoreGive(status_mux);
-        }
-        else
-            printf("failed to acquire det mutex\n");
+        //if (xSemaphoreTake(status_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
+        //    printf("Status: %d\n", status);
+        //    xSemaphoreGive(status_mux);
+        //}
+        //else
+        //    printf("failed to acquire det mutex\n");
 
         // get image copy
         std::vector<uint8_t> img_copy;
