@@ -92,7 +92,8 @@ using namespace std;
 #define LOAD_MASK_PATH  "/load_mask"
 #define SAVE_MASK_PATH  "/save_mask"
 
-#define MODEL_PATH "/models/my_models/tf2_ssd_mobilenet_v2_coco17_ptq_edgetpu.tflite"
+//#define MODEL_PATH "/models/my_models/tf2_ssd_mobilenet_v2_coco17_ptq_edgetpu.tflite"
+#define MODEL_PATH "/models/my_models/ssdlite_mobiledet_coco_qat_postprocess_edgetpu.tflite"
 
 
 #define TENSOR_ARENA_SIZE     8 * 1024 * 1024
@@ -428,21 +429,23 @@ std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, float thre
         return tmp_results[lhs].score > tmp_results[rhs].score;
     });
 
-    // non-maximum suppresion
     while (!indices.empty()) {
         int idx = indices.front();
         indices.erase(indices.begin());
         auto current_box = tmp_results[idx];
 
+        // NMS
+        // probably not required as the model has it inside
         // go through remaining box and check if there are any that overlap with the current box and have lower score
-        for (auto it = indices.begin(); it != indices.end(); ) {
-            //if (IoU(current_box.bbox, tmp_results[*it].bbox) > iou_threshold)
-            if (IoU(current_box, tmp_results[*it]) > iou_threshold)
-                it = indices.erase(it);
-            else
-                it++;
-        }
+        //for (auto it = indices.begin(); it != indices.end(); ) {
+        //    //if (IoU(current_box.bbox, tmp_results[*it].bbox) > iou_threshold)
+        //    if (IoU(current_box, tmp_results[*it]) > iou_threshold)
+        //        it = indices.erase(it);
+        //    else
+        //        it++;
+        //}
 
+        // ignore boxes with not enough change
         if (xSemaphoreTake(image_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
         if (hasChangedAverage(image, last_frame, width, height, current_box.xmin * width, current_box.ymin * width, current_box.xmax * width, current_box.ymax * width, 100, 0.05f))
             results.push_back(current_box);
@@ -512,13 +515,13 @@ static void detectTask(void *args) {
 
         // run model
         if (interpreter->Invoke() != kTfLiteOk) {
-            printf("Invoke failed\r\n");
+            printf("Invoke failed\n");
             setStatus(-2);
             continue;
         }
 
         if (interpreter->outputs().size() != 4) {
-            printf("Output size mismatch\r\n");
+            printf("Output size mismatch\\n");
             setStatus(-3);
             continue ;
         }
@@ -575,12 +578,25 @@ void setup() {
     image_mux = xSemaphoreCreateMutex();
     result_mux = xSemaphoreCreateMutex();
 
-    auto* input_tensor = interpreter->input_tensor(0);
+    auto input_tensor = interpreter->input_tensor(0);
     height  = input_tensor->dims->data[1];
     width   = input_tensor->dims->data[2];
+    printf("Input dimensions: %d %d\n", width, height);
 
-    printf("%d %d\n", width, height);
-    
+    if (input_tensor->quantization.type) {
+        printf("input is quantized\n");
+        auto params = (TfLiteAffineQuantization *)input_tensor->quantization.params;
+        printf("dim: %d\nscale: %f\nzero-point: %d\n", params->quantized_dimension, params->scale, params->zero_point);
+    }
+
+    auto output_tensor = interpreter->output_tensor(0);
+
+    if (output_tensor->quantization.type) {
+        printf("output is quantized\n");
+        auto params = (TfLiteAffineQuantization *)output_tensor->quantization.params;
+        printf("dim: %d\nscale: %f\nzero-point: %d\n", params->quantized_dimension, params->scale, params->zero_point);
+    }
+
     // create and save image storages
     image.resize(width * height * CameraFormatBpp(CameraFormat::kRgb), 0);
 
@@ -773,12 +789,10 @@ extern "C" void app_main(void* param) {
     setup();
 
     xTaskCreate(detectTask, "detect", 0x4000, nullptr, 3, &detect_task_handle);
-
     PostHttpServer http_server;
     http_server.addPostPath(SAVE_MASK_PATH);
     http_server.registerPostFinishedCallback(onPostFinished);
     http_server.AddUriHandler(UriHandler);
     UseHttpServer(&http_server);
-
     vTaskSuspend(nullptr);
 }
