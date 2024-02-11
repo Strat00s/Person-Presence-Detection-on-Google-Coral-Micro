@@ -649,7 +649,7 @@ HttpServer::Content UriHandler(const char* uri) {
         }
 
         std::vector<uint8_t> jpeg;
-        JpegCompressRgb(img_copy.data(), width, height, 100, &jpeg);
+        JpegCompressRgb(img_copy.data(), width, height, 75, &jpeg);
         return jpeg;
     }
     else if (StrEndsWith(uri, LOAD_MASK_PATH)) {
@@ -772,7 +772,7 @@ extern "C" void app_main(void* param) {
 
     setup();
 
-    xTaskCreate(detectTask, "detect", 0x4000, nullptr, 0, &detect_task_handle);
+    xTaskCreate(detectTask, "detect", 0x4000, nullptr, 3, &detect_task_handle);
 
     PostHttpServer http_server;
     http_server.addPostPath(SAVE_MASK_PATH);
