@@ -21,8 +21,8 @@ typedef struct {
 class PostHttpServer : public HttpServer {
   private:
     std::map<void*, payload_uri_t> payload_buffer;              //payload buffers while processing payloads
-    std::unordered_set<std::string> post_paths;                 //supported post paths
-    void (*postFinishedCallback)(payload_uri_t payload_uri);    //function to call once all data are saved
+    //std::unordered_set<std::string> post_paths;                 //supported post paths
+    int (*postFinishedCallback)(payload_uri_t payload_uri);    //function to call once all data are saved
 
   public:
 
@@ -30,7 +30,7 @@ class PostHttpServer : public HttpServer {
      * 
      * @param func Function to call with argument of type payload_uri_t
      */
-    void registerPostFinishedCallback(void (*func)(payload_uri_t)) {
+    void registerPostFinishedCallback(int (*func)(payload_uri_t)) {
         postFinishedCallback = func;
     }
 
@@ -38,9 +38,9 @@ class PostHttpServer : public HttpServer {
      * 
      * @param post_path supported post path
      */
-    void addPostPath(std::string post_path) {
-        post_paths.insert(post_path);
-    }
+    //void addPostPath(std::string post_path) {
+    //    post_paths.insert(post_path);
+    //}
 
     // Called when an HTTP POST request is first received.
     // This must be implemented by subclasses that want to handle posts.
@@ -66,15 +66,14 @@ class PostHttpServer : public HttpServer {
         (void)post_auto_wnd;
 
         //post_paths.insert(uri);
-        if (post_paths.find(uri) == post_paths.end()) {
-            printf("unsuported post path\r\n");
-            return ERR_ARG;
-        }
+        //if (post_paths.find(uri) == post_paths.end()) {
+        //    printf("unsuported post path\r\n");
+        //    return ERR_ARG;
+        //}
 
         //copy uri and reserver space
         payload_buffer[connection].uri = uri;
         payload_buffer[connection].payload.reserve(content_len);
-        printf("Everything ok\r\n");
         return ERR_OK;
     }
 
@@ -112,14 +111,13 @@ class PostHttpServer : public HttpServer {
     //   the request.
     // @param response_uri_len Size of the 'response_uri' buffer.
     void PostFinished(void* connection, char* response_uri, u16_t response_uri_len) {
-        //(void)connection;
-        //TODO fill response uri
-        (void)response_uri;
-        (void)response_uri_len;
-        
+        // write a file path to the response_uri of a file that is stored inside the device in its fs (/index.html for example is the main web page)
+
         //call callback
-        postFinishedCallback(payload_buffer[connection]);
-        
+        int res = postFinishedCallback(payload_buffer[connection]);
+        if (res >= 200 && res < 300)
+            snprintf(response_uri, response_uri_len, "/index.html");
+
         //remove current buffer
         payload_buffer.erase(connection);
     };

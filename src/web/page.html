@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body {
+      display: flex;
+      margin: 0;
+      padding: 0;
+      height: 100vh;
+    }
+
+    #video-container {
+      flex: 1;
+      background-color: #f0f0f0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+
+    #settings-container {
+      flex: 1;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .settings-group {
+      border-bottom: 2px solid #ddd;
+      padding: 10px 0;
+      justify-content: left;
+      column-gap: 20px;
+    }
+
+    .settings-group:last-child {
+      border-bottom: none;
+    }
+
+    .input-wrapper {
+      position: relative;
+      display: inline-block;
+    }
+
+    .input-wrapper input {
+      text-align: right;
+      padding-right: 20px;
+      /* Make space for the symbol */
+    }
+
+    .input-wrapper span {
+      position: absolute;
+      right: 5px;
+      /* Adjust based on padding and preferences */
+      top: 50%;
+      transform: translateY(-50%);
+      pointer-events: none;
+      /* Makes it non-interactive */
+    }
+
+
+    #gridCanvas {
+      display: 'none';
+      position: absolute;
+      width: 320px;
+      height: 320px;
+    }
+
+    .cell {
+      width: 10px;
+      /* 320px / 32 cells */
+      height: 10px;
+      float: left;
+      border: 1px solid #dddddd57;
+      box-sizing: border-box;
+      cursor: pointer;
+    }
+
+    .toggled {
+      background-color: rgba(255, 0, 0, 0.338);
+    }
+  </style>
+
+
+  <title>Camera grid mask</title>
+</head>
+
+<body id="body" onload="start()">
+
+  <div id="video-container">
+    <img id="stream" src="https://picsum.photos/320/320" alt="Image cannot be displayed" />
+    <div id="gridCanvas"></div>
+  </div>
+
+  <div id="settings-container">
+
+    <div class="settings-group">
+      <label for="image-rotation" class="input-label">Device rotation:</label>
+      <select name="image-rotation" id="image-rotation">
+        <option value=0 selected>0</option>
+        <option value=90>90</option>
+        <option value=180>180</option>
+        <option value=270>270</option>
+      </select>
+    </div>
+
+    <div class="settings-group">
+      <label for="grid-size">Grid size:</label>
+      <input type="number" id="grid-size" name="grid-size" size="3" maxlength="3" min="2" max="320">
+      <button id="toggleMaskBtn" onclick="toggleMask()">Toggle mask</button>
+    </div>
+
+    <div class="settings-group">
+      <label for="det-thresh">Detection threshold:</label>
+      <div class="input-wrapper">
+        <input type="number" id="det-thresh" name="det-thresh" size="3" maxlength="3" min="0" max="100">
+        <span>%</span>
+      </div>
+
+      <label for="iou-thresh">Overlap threshold:</label>
+      <div class="input-wrapper">
+        <input type="number" id="iou-thresh" name="iou-thresh" size="3" maxlength="3" min="0" max="100">
+        <span>%</span>
+      </div>
+    </div>
+
+    <div class="settings-group">
+      <label for="fp-change">False-positive change threshold:</label>
+      <div class="input-wrapper">
+        <input type="number" id="fp-change" name="fp-change" size="3" maxlength="3" min="0" max="100" />
+        <span>%</span>
+      </div>
+
+      <label for="fp-count">False-positive count threshold:</label>
+      <div class="input-wrapper">
+        <input type="number" id="fp-count" name="fp-count" size="3" maxlength="3" min="0" max="100">
+        <span>%</span>
+      </div>
+    </div>
+
+    <div class="settings-group">
+      <button id="saveToDevice" onclick="saveSettings()">Save config</button>
+      <button id="loadFromDevice" onclick="">Load config</button>
+      <button id="resetFromDevice" onclick="">Reset config</button>
+    </div>
+
+    <div class="settings-group">
+      <button id="saveToFileBtn" onclick="">Save configuration to file</button>
+      <button id="loadFromFileBtn" onclick="">Load configuration from file</button>
+    </div>
+
+  </div>
+
+
+  <script>
+    const imgUrl = "/camera_stream"; //get
+    const configUrl = "/config"; //get set
+    const statusUrl = "/status";
+    const imageSize = 320;
+
+    var maskSize = 32; //current mask size (cell count per dimension)
+    var rotation = 0;
+    var detection = 0.5;
+    var iou = 0.5;
+    var fpChange = 0.4;
+    var fpCount = 0.05;
+
+
+
+    //mask [0] -> mask values
+    //     [1] -> cell elements
+    // Initialize grid and mask data structure
+    //let mask = [new Array(maskSize), new Array(maskSize)];
+    var mask = {
+      "val": new Array(maskSize).fill(new Array(maskSize).fill(0)),
+      "elem": new Array(maskSize).fill(new Array(maskSize).fill(null))
+    };
+    let mouseIsDown = false; // Tracks if the mouse is pressed down
+    let toggleDir = 0;
+
+
+    // start everything important on load
+    function start() {
+      createGrid();
+      updatePreview();
+    }
+
+
+    function postData(url, type, data) {
+      return fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": type,
+        },
+        body: data
+      })
+        .then(response => {
+          if (!response.ok) {
+            console.error("Post not OK (", response.status, "): ", response.statusText);
+            throw new Error("Post not ok");
+          }
+          else
+            console.log("Post OK (", response.status, ")");
+          return response.text();
+        })
+        .then(body => {
+          console.log("Success: ", body)
+        })
+        .catch(error => console.error("Error: ", error))
+    }
+
+    function getData(url) {
+      return fetch(url)
+        .then(response => {
+          // Check if the response is ok (status code 200-299)
+          if (!response.ok) {
+            console.error("Get not OK (", response.status, "): ", response.statusText);
+            return Promise.reject("Get not OK");
+          }
+          else
+            console.log("Get OK (", response.status, ")");
+          return response.json();
+        })
+        .then(config => {
+          console.log(config)
+        })
+        .catch(error => {
+          console.error("Get error: ", error)
+          return Promise.reject(error);
+        });
+    }
+
+    function loadSettings() {
+      getData("/config")
+        .then(config => {
+          console.log("Settings loaded");
+          maskSize = config["maskSize"];
+          mask = config["mask"];
+          rotation = config["rotation"];
+          detection = config["detection"];
+          iou = config["iou"];
+          fpChange = config["fpChange"];
+          fpCount = config["fpCount"];
+        })
+        .catch(error => console.error("Failed to load config: ", error));
+    }
+
+    function saveSettings() {
+      let maskVal = "";
+      mask.val.forEach(row => {
+        row.forEach(item => {
+          maskVal += item.toString();
+        })
+      })
+      var data = {
+        "maskSize": maskSize,
+        "mask": maskVal,
+        "rotation": rotation,
+        "detection": detection,
+        "iou": iou,
+        "fpChange": fpChange,
+        "fpCount": fpCount,
+      }
+      postData("/save_config", "application/json", JSON.stringify(data))
+        .then(console.log("Settings saved"))
+        .catch(error => console.error("Failed to save config: ", error));
+    }
+
+
+    function toggleMask() {
+      var grid = document.getElementById('gridCanvas');
+      if (grid.style.display == 'none')
+        grid.style.display = 'block'; // The grid was hidden, now show it
+      else
+        grid.style.display = 'none'; // The grid is visible, now hide it
+    }
+
+    //function loadMask() {
+    //    let payload = getJsonData("/load_mask");
+    //    if (payload.grid == undefined)
+    //        console.log("invalid json received");
+    //    console.log("TODO")
+    //}
+
+    //function saveMask() {
+    //    let payload = "32,32,";
+    //    mask.val.forEach(row => {
+    //        row.forEach(item => {
+    //            payload += item;
+    //        })
+    //    })
+    //    console.log(payload);
+    //    postCsvData('/save_mask', payload);
+    //}
+
+    function resetMask() {
+      toggleDir = 0;
+      for (let i = 0; i < maskSize; i++) {
+        for (let j = 0; j < maskSize; j++) {
+          toggleCell(i, j);
+        }
+      }
+    }
+
+
+    // Function to toggle cells
+    function toggleCell(i, j) {
+      if (toggleDir)
+        mask.elem[i][j].classList.add('toggled');//cell.classList.add('toggled');
+      else
+        mask.elem[i][j].classList.remove('toggled');//cell.classList.remove('toggled');
+
+      mask.val[i][j] = toggleDir;
+    }
+
+    // Function to create grid cells
+    function createGrid() {
+      const gridCanvas = document.getElementById('gridCanvas');
+      for (let i = 0; i < maskSize; i++) {
+        for (let j = 0; j < maskSize; j++) {
+          const cell = document.createElement('div');
+          cell.className = 'cell';
+          cell.dataset.toggled = false; // Custom attribute to track state
+
+          cell.addEventListener('mousedown', function (event) {
+            mouseIsDown = true;
+            toggleDir = mask.val[i][j] ? 0 : 1;
+            toggleCell(i, j);
+            event.preventDefault(); // Prevent text selection
+          });
+
+          cell.addEventListener('mouseenter', function () {
+            if (mouseIsDown)
+              toggleCell(i, j);
+          });
+
+          cell.addEventListener('mouseup', function () {
+            mouseIsDown = false;
+          });
+
+          gridCanvas.appendChild(cell);
+          mask.elem[i][j] = cell;
+        }
+      }
+    }
+
+    // Reset the toggle tracking on mouseup anywhere in the window
+    window.addEventListener('mouseup', function () {
+      mouseIsDown = false;
+      let cells = document.getElementsByClassName('cell');
+      for (let cell of cells)
+        cell.dataset.toggled = false; // Reset all cells' state
+    });
+
+    // faster image reading using objecturl instead of fileread
+    async function updatePreview() {
+      while (1) {
+        try {
+          let imageBlob = await fetch(imgUrl).then(resp => resp.blob());
+          let imgElt = document.getElementById("stream");
+
+          // Revoke the previous object URL to avoid memory leaks
+          if (imgElt.src.startsWith('blob:'))
+            URL.revokeObjectURL(imgElt.src);
+
+          imgElt.src = URL.createObjectURL(imageBlob);
+          imgElt.width = imageSize;//document.getElementById("image-width").value;
+          imgElt.height = imageSize;//document.getElementById("image-height").value;
+          //let rotation  = document.getElementById("image-rotation").value;
+          //imgElt.style.transform = 'rotate(' + rotation.toString() + 'deg)';
+        } catch (reason) {
+          console.error("Error while fetching image: " + reason.toString());
+        }
+
+        // Adjust this value as needed for performance and update frequency
+        await sleep(20);
+      }
+    }
+
+    function sleep(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    // Call createGrid on page load
+    //window.onload = createGrid;
+  </script>
+
+</body>
+
+</html>

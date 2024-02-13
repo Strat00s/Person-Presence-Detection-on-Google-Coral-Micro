@@ -87,13 +87,14 @@ using namespace coralmicro;
 using namespace std;
 
 
-#define INDEX_FILE_NAME "/coral_micro_camera.html"
+#define INDEX_FILE_NAME "/page.html"
 #define STREAM_PATH     "/camera_stream"
 #define LOAD_MASK_PATH  "/load_mask"
 #define SAVE_MASK_PATH  "/save_mask"
+#define SAVE_CONFIG_PATH "/save_config"
 
 //#define MODEL_PATH "/models/my_models/tf2_ssd_mobilenet_v2_coco17_ptq_edgetpu.tflite"
-#define MODEL_PATH "/models/my_models/ssdlite_mobiledet_coco_qat_postprocess_edgetpu.tflite"
+#define MODEL_PATH "/model.tflite"
 
 
 #define TENSOR_ARENA_SIZE     8 * 1024 * 1024
@@ -616,7 +617,7 @@ void setup() {
 }
 
 HttpServer::Content UriHandler(const char* uri) {
-    if (StrEndsWith(uri, "index.shtml") || StrEndsWith(uri, "coral_micro_camera.html"))
+    if (StrEndsWith(uri, "index.shtml") || StrEndsWith(uri, "index.html"))
         return std::string(INDEX_FILE_NAME);
     
     else if (StrEndsWith(uri, STREAM_PATH)) {
@@ -680,13 +681,21 @@ HttpServer::Content UriHandler(const char* uri) {
     return {};
 }
 
-void onPostFinished(payload_uri_t payload_uri) {
+int onPostFinished(payload_uri_t payload_uri) {
     printf("on post finished\r\n");
+
+    if (StrEndsWith(payload_uri.uri, SAVE_CONFIG_PATH)) {
+        printf("save config\n");
+        for (size_t i = 0; i < payload_uri.payload.size(); i++)
+            printf("%c", payload_uri.payload[i]);
+        printf("\n");
+        return 200;
+    }
 
     if (StrEndsWith(payload_uri.uri, SAVE_MASK_PATH)) {
         if (payload_uri.payload.size() <= 0) {
             printf("Invalid payload size");
-            return;
+            return 200;
         }
 
         //TODO I am currently expecting the payload to be in valid format
@@ -715,6 +724,8 @@ void onPostFinished(payload_uri_t payload_uri) {
         }
         printf("\r\n");
     }
+
+    return 404;
 }
 
 
@@ -742,7 +753,6 @@ extern "C" void app_main(void* param) {
     image_mask.grid.reserve(image_mask.height);
     for (int i = 0; i < image_mask.height * image_mask.width; i++)
         image_mask.grid.push_back(0);
-
 
 
     tflite::MicroErrorReporter error_reporter;
@@ -790,7 +800,6 @@ extern "C" void app_main(void* param) {
 
     xTaskCreate(detectTask, "detect", 0x4000, nullptr, 3, &detect_task_handle);
     PostHttpServer http_server;
-    http_server.addPostPath(SAVE_MASK_PATH);
     http_server.registerPostFinishedCallback(onPostFinished);
     http_server.AddUriHandler(UriHandler);
     UseHttpServer(&http_server);
