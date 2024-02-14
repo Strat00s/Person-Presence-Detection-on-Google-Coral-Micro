@@ -19,21 +19,21 @@
       align-items: center;
     }
 
-    #settings-container {
+    #config-container {
       flex: 1;
       padding: 20px;
       display: flex;
       flex-direction: column;
     }
 
-    .settings-group {
+    .config-group {
       border-bottom: 2px solid #ddd;
       padding: 10px 0;
       justify-content: left;
       column-gap: 20px;
     }
 
-    .settings-group:last-child {
+    .config-group:last-child {
       border-bottom: none;
     }
 
@@ -92,25 +92,31 @@
     <div id="gridCanvas"></div>
   </div>
 
-  <div id="settings-container">
+  <div id="config-container">
 
-    <div class="settings-group">
+    <div class="config-group">
       <label for="image-rotation" class="input-label">Device rotation:</label>
       <select name="image-rotation" id="image-rotation">
-        <option value=0 selected>0</option>
+        <option value=0>0</option>
         <option value=90>90</option>
         <option value=180>180</option>
         <option value=270>270</option>
       </select>
     </div>
 
-    <div class="settings-group">
+    <div class="config-group">
+      <label for="jpeg-size">Preview quality:</label>
+      <input type="number" id="jpeg-size" name="jpeg-size" size="3" maxlength="3" min="5" max="100">
+    </div>
+
+    <div class="config-group">
       <label for="grid-size">Grid size:</label>
       <input type="number" id="grid-size" name="grid-size" size="3" maxlength="3" min="2" max="320">
       <button id="toggleMaskBtn" onclick="toggleMask()">Toggle mask</button>
+      <button id="resetMaskBtn" onclick="resetMask()">Reset mask</button>
     </div>
 
-    <div class="settings-group">
+    <div class="config-group">
       <label for="det-thresh">Detection threshold:</label>
       <div class="input-wrapper">
         <input type="number" id="det-thresh" name="det-thresh" size="3" maxlength="3" min="0" max="100">
@@ -124,7 +130,7 @@
       </div>
     </div>
 
-    <div class="settings-group">
+    <div class="config-group">
       <label for="fp-change">False-positive change threshold:</label>
       <div class="input-wrapper">
         <input type="number" id="fp-change" name="fp-change" size="3" maxlength="3" min="0" max="100" />
@@ -138,13 +144,13 @@
       </div>
     </div>
 
-    <div class="settings-group">
-      <button id="saveToDevice" onclick="saveSettings()">Save config</button>
-      <button id="loadFromDevice" onclick="loadSettings()">Load config</button>
-      <button id="resetFromDevice" onclick="resetSettings()">Reset config</button>
+    <div class="config-group">
+      <button id="saveToDevice" onclick="saveConfig()">Save config</button>
+      <button id="loadFromDevice" onclick="loadConfig()">Load config</button>
+      <button id="resetFromDevice" onclick="resetConfig()">Reset config</button>
     </div>
 
-    <div class="settings-group">
+    <div class="config-group">
       <button id="saveToFileBtn" onclick="">Save configuration to file</button>
       <button id="loadFromFileBtn" onclick="">Load configuration from file</button>
     </div>
@@ -154,13 +160,14 @@
 
   <script>
     const imgUrl = "/camera_stream"; //get
-    const configUrl = "/config"; //get set
+    const configSaveUrl = "/config_save"; //get set
+    const configLoadUrl = "/config_load"; //get set
     const configResetUrl = "/config_reset";
     const statusUrl = "/status";
 
     var imageSize = 320;
     var maskSize = 32; //current mask size (cell count per dimension)
-    var rotation = 3;
+    var rotation = 270;
     var detThresh = 50;
     var iouThresh = 50;
     var fpChange = 40;
@@ -172,9 +179,9 @@
     //     [1] -> cell elements
     // Initialize grid and mask data structure
     //let mask = [new Array(maskSize), new Array(maskSize)];
-    var mask = {
-      "val": new Array(maskSize).fill(new Array(maskSize).fill(0)),
-      "elem": new Array(maskSize).fill(new Array(maskSize).fill(null))
+    let mask = {
+      "val": Array.from({ length: maskSize }, () => new Array(maskSize).fill(0)),
+      "elem": Array.from({ length: maskSize }, () => new Array(maskSize).fill(null))
     };
     let mouseIsDown = false; // Tracks if the mouse is pressed down
     let toggleDir = 0;
@@ -182,6 +189,14 @@
 
     // start everything important on load
     function start() {
+      document.getElementById("grid-size").value = maskSize;
+      document.getElementById("image-rotation").value = rotation;
+      document.getElementById("det-thresh").value = detThresh;
+      document.getElementById("iou-thresh").value = iouThresh;
+      document.getElementById("fp-change").value = fpChange;
+      document.getElementById("fp-count").value = fpCount;
+      document.getElementById("jpeg-size").value = jpegQuality;
+      loadConfig();
       createGrid();
       updatePreview();
     }
@@ -210,7 +225,7 @@
         .catch(error => console.error("Error: ", error))
     }
 
-    function getData(url) {
+    function getData(url, isJson) {
       return fetch(url)
         .then(response => {
           // Check if the response is ok (status code 200-299)
@@ -220,10 +235,7 @@
           }
           else
             console.log("Get OK (", response.status, ")");
-          return response.json();
-        })
-        .then(config => {
-          console.log(config)
+          return isJson ? response.json() : response.text();
         })
         .catch(error => {
           console.error("Get error: ", error)
@@ -231,46 +243,71 @@
         });
     }
 
-    function loadSettings() {
-      getData(configUrl)
+    function loadConfig() {
+      getData(configLoadUrl, false)
         .then(config => {
-          console.log("Settings loaded");
-          console.log("CSV parser not done yet");
-          //maskSize = config["maskSize"];
-          //mask = config["mask"];
-          //rotation = config["rotation"];
-          //detThresh = config["detThresh"];
-          //iouThresh = config["iouThresh"];
-          //fpChange = config["fpChange"];
-          //fpCount = config["fpCount"];
+          console.log("Config loaded");
+          const values = config.split(',');
+          console.log(values);
+          maskSize = values[0];
+          rotation = values[2];
+          detThresh = values[3];
+          iouThresh = values[4];
+          fpChange = values[5];
+          fpCount = values[6];
+          jpegQuality = values[7];
+          for (var i = 0; i < maskSize; i++) {
+            for (var ii = 0; ii < maskSize; ii++) {
+              mask.val[i][ii] = Number(values[1][i * maskSize + ii]);
+              toggleDir = mask.val[i][ii];
+              toggleCell(i, ii);
+            }
+          }
+
+          document.getElementById("image-rotation").value = rotation;
+          document.getElementById("grid-size").value = maskSize;
+          document.getElementById("det-thresh").value = detThresh;
+          document.getElementById("iou-thresh").value = iouThresh;
+          document.getElementById("fp-change").value = fpChange;
+          document.getElementById("fp-count").value = fpCount;
+          document.getElementById("jpeg-size").value = jpegQuality;
         })
         .catch(error => console.error("Failed to load config: ", error));
     }
 
-    function saveSettings() {
+    function saveConfig() {
       let maskVal = "";
       mask.val.forEach(row => {
         row.forEach(item => {
           maskVal += item.toString();
         })
       })
+
+      rotation = document.getElementById("image-rotation").value;
+      maskSize = document.getElementById("grid-size").value;
+      detThresh = document.getElementById("det-thresh").value;
+      iouThresh = document.getElementById("iou-thresh").value;
+      fpChange = document.getElementById("fp-change").value;
+      fpCount = document.getElementById("fp-count").value;
+      jpegQuality = document.getElementById("jpeg-size").value;
+
       var data = maskSize.toString() + ",";
-      data += maskVal                + ",";
-      data += rotation.toString()    + ",";
-      data += detThresh.toString()   + ",";
-      data += iouThresh.toString()   + ",";
-      data += fpChange.toString()    + ",";
-      data += fpCount.toString()     + ",";
+      data += maskVal + ",";
+      data += rotation.toString() + ",";
+      data += detThresh.toString() + ",";
+      data += iouThresh.toString() + ",";
+      data += fpChange.toString() + ",";
+      data += fpCount.toString() + ",";
       data += jpegQuality.toString();
-      postData(configUrl, "text/plain", data)
-        .then(console.log("Settings saved"))
+      postData(configSaveUrl, "text/plain", data)
+        .then(console.log("Config saved:", data))
         .catch(error => console.error("Failed to save config: ", error));
     }
 
-    function loadSettings() {
-      getData(configResetUrl)
+    function resetConfig() {
+      getData(configResetUrl, false)
         .then(config => {
-          console.log("Settings reset loaded");
+          console.log("Config reset loaded");
           console.log("CSV parser not done yet");
           //maskSize = config["maskSize"];
           //mask = config["mask"];
@@ -290,24 +327,6 @@
       else
         grid.style.display = 'none'; // The grid is visible, now hide it
     }
-
-    //function loadMask() {
-    //    let payload = getJsonData("/load_mask");
-    //    if (payload.grid == undefined)
-    //        console.log("invalid json received");
-    //    console.log("TODO")
-    //}
-
-    //function saveMask() {
-    //    let payload = "32,32,";
-    //    mask.val.forEach(row => {
-    //        row.forEach(item => {
-    //            payload += item;
-    //        })
-    //    })
-    //    console.log(payload);
-    //    postCsvData('/save_mask', payload);
-    //}
 
     function resetMask() {
       toggleDir = 0;

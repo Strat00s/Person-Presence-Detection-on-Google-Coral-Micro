@@ -32,3 +32,6 @@ Drawing is slow (obviously). My guess is that context switching and everything a
 Since drawing onto the image and displaying the webpage takes the longest, I want to move it to the M4 core and have low FPS for preview, while leaving M7 to run inference with the edge tpu (M4 does not have access to the tpu anyways).
 
 TLDR: optimization is a must. But first.
+
+## Exceptions and crashes
+no clue, but you can edit coralmicro/cmake/toolchain-arm-none-eabi-gcc.cmake to add arguments to build.

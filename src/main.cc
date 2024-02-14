@@ -1,51 +1,14 @@
-/** YOLO tensor data extraction
-auto tensor = interpreter->output_tensor(0);
-//printf("Outputs size: %d\n", interpreter->outputs_size());
-//printf("Dimensions: %d\n", tensor->dims->size);
-//printf("size: %d %d %d\n", tensor->dims->data[0], tensor->dims->data[1], tensor->dims->data[2]);
-//printf("type: %d\n", tensor->type);
-int box_cnt = tensor->dims->data[1];
-int info_cnt = tensor->dims->data[2];
-auto tensor_data = tflite::GetTensorData<uint8_t>(tensor);
+//TODO separate load and save for config
+//TODO configurable grid size
+//TODO rotation
+//TODO save to file
+//TODO load from file
+//TODO reset config
 
-//std::vector<tensorflow::Object> results;
-results.clear();
-float scale = 0.005149809643626213f;
-int zero_point = 4;
-for (int i = 0; i < box_cnt; i++) {
-    float score = (tensor_data[i * info_cnt + 4] - zero_point) * scale;
-    if (score < 0.5)
-        continue;
-    score = (tensor_data[i * info_cnt + 5] - zero_point) * scale;
-    float max_score = (*std::max_element(tensor_data + i * info_cnt + 5, tensor_data + i * info_cnt + 5 + 80) - zero_point) * scale;
-    if (score < max_score)
-        continue;
-    int id = 0;
-    printf("%d %d %d %d\n", tensor_data[i * info_cnt], tensor_data[i * info_cnt + 1], tensor_data[i * info_cnt+ 2], tensor_data[i * info_cnt+3]);
-    float bx = (tensor_data[i * info_cnt] - zero_point) * scale;
-    float by = (tensor_data[i * info_cnt + 1] - zero_point) * scale;
-    float bw = (tensor_data[i * info_cnt + 2]) * scale; // width and height should not have zero_point subtracted
-    float bh = (tensor_data[i * info_cnt + 3]) * scale; // before the division by 2
+//TODO move stuff to m4 core
+//TODO move stuff to own classes
 
-    // Convert from center coordinates to top-left and bottom-right coordinates
-    float x1 = (bx - bw / 2.0f);
-    float y1 = (by - bh / 2.0f);
-    float x2 = (bx + bw / 2.0f);
-    float y2 = (by + bh / 2.0f);
-    results.push_back(
-        tensorflow::Object{
-            .id = id,
-            .score = score,
-            .bbox = {
-                .ymin = y1,
-                .xmin = x1,
-                .ymax = y2,
-                .xmax = x2
-            }
-        }
-    );
-}
-*/
+//TODO UI???
 
 #include <cstdio>
 #include <vector>
@@ -84,7 +47,8 @@ using namespace std;
 
 #define MAIN_WEB_PATH         "/page.html"
 #define STREAM_WEB_PATH       "/camera_stream"
-#define CONFIG_WEB_PATH       "/config"
+#define CONFIG_SAVE_WEB_PATH  "/config_save"
+#define CONFIG_LOAD_WEB_PATH  "/config_load"
 #define CONFIG_RESET_WEB_PATH "/config_reset"
 #define MODEL_PATH            "/model.tflite"
 #define CONFIG_PATH           "/cfg.csv"
@@ -99,7 +63,7 @@ int image_size   = 320;
 typedef struct {
     int mask_size = 32;
     std::vector<uint8_t> mask;
-    int rotation = 3;
+    int rotation = 270;
     int det_thresh = 50;
     int iou_thresh = 50;
     int fp_change = 40;
@@ -138,74 +102,109 @@ typedef struct {
 std::vector<bbox_t> results;
 
 
+/** @brief build config csv from current config 
+ * 
+ * @param config 
+ * @return std::string 
+ */
+std::string buildConfigCsv(cfg_t config) {
+    std::string cfg = std::to_string(config.mask_size) + ',';
+    for (auto val: config.mask)
+        cfg += std::to_string(val);
+    cfg += ',';
+    cfg += std::to_string(config.rotation)   + ',';
+    cfg += std::to_string(config.det_thresh) + ',';
+    cfg += std::to_string(config.iou_thresh) + ',';
+    cfg += std::to_string(config.fp_change)  + ',';
+    cfg += std::to_string(config.fp_count)   + ',';
+    cfg += std::to_string(config.jpeg_quality);
+
+    printf("Newly built config: %s\n", cfg.c_str());
+
+    return cfg;
+}
+
 /** @brief Partse config csv string and save it to global variables
  * 
  * @param config_csv string with valid csv
  * @return 0 on success, 1 on failure to acquire mutex 
 */
 int saveConfig(std::string config_csv) {
-    if (std::count(config_csv.begin(), config_csv.end(), ',') < 7)
+    if (std::count(config_csv.begin(), config_csv.end(), ',') < 7) {
+        printf("invalid csv\n");
         return 2;
+    }
 
-    int field_num = 0;
+    bool malformed = false;
+    bool finished = false;
+    int field_num = -1;
     size_t start = 0;
     size_t end = config_csv.find(',');
     cfg_t new_config;
     new_config.mask.resize(new_config.mask_size * new_config.mask_size, 0);
 
-    while (end != std::string::npos) {
+    while (!finished) {
+        field_num++;
+        if (end == std::string::npos) {
+            finished = true;
+            end = config_csv.size();
+        }
         std::string field_val = config_csv.substr(start, end - start);
         printf("%d %s %d %d\n", field_num, field_val.c_str(), start, end);
+
+        vTaskDelay(10);
 
         start = end + 1;
         end = config_csv.find(',', start);
 
-        if (field_val.size() == 0)
+        if (field_val.size() == 0) {
+            malformed = true;
             continue;
-    
-        switch (field_num++) {
-            case 0: new_config.mask_size = std::stoi(field_val); break;
-            case 1: {
-                new_config.mask.resize(field_val.size());
-                for (size_t i = 0; i < field_val.size(); i++)
-                    new_config.mask[i] = field_val[i] == '1';
-                break;
-            }
-            case 2: new_config.rotation     = std::stoi(field_val); break;
-            case 3: new_config.det_thresh   = std::stoi(field_val); break;
-            case 4: new_config.iou_thresh   = std::stoi(field_val); break;
-            case 5: new_config.fp_change    = std::stoi(field_val); break;
-            case 6: new_config.fp_count     = std::stoi(field_val); break;
-            case 7: new_config.jpeg_quality = std::stoi(field_val); break;
+        }
+
+        if (field_num == 1) {
+            new_config.mask.clear();
+            new_config.mask.reserve(field_val.size());
+            for (size_t i = 0; i < field_val.size(); i++)
+                new_config.mask.push_back(field_val[i] == '1');
+            continue;
+        }
+
+        int val = 0;
+        try {
+            val = std::stoi(field_val);
+        }
+        catch(const std::exception& e) {
+            printf("%s\n", e.what());
+            continue;
+        }
+
+        switch (field_num) {
+            case 0: new_config.mask_size    = val; break;
+            case 2: new_config.rotation     = val; break;
+            case 3: new_config.det_thresh   = val; break;
+            case 4: new_config.iou_thresh   = val; break;
+            case 5: new_config.fp_change    = val; break;
+            case 6: new_config.fp_count     = val; break;
+            case 7: new_config.jpeg_quality = val; break;
             default: printf("Unhandled field %d: %s\n", field_num, field_val.c_str()); break;
         }
+    }
+
+    if (malformed) {
+        new_config.mask.resize(new_config.mask_size * new_config.mask_size, 0);
+        LfsWriteFile(CONFIG_PATH, buildConfigCsv(new_config));
     }
 
     if (xSemaphoreTake(config_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
         config = new_config;
         xSemaphoreGive(config_mux);
+        printf("config saved\n");
         return 0;
     }
+
     printf("Failed to get config mutex\n");
     return 1;
-}
-
-/** @brief Load configuration csv from a file and update global variables
- * 
- * @return config csv string on success, empty on failure
- */
-std::string loadConfigFile() {
-    if (!LfsFileExists(CONFIG_PATH))
-        return "File does not exist";
-
-    std::string config_csv;
-    if (!LfsReadFile(CONFIG_PATH, &config_csv))
-        return "Failed to read file";
-
-    if (saveConfig(config_csv))
-        return "Failed to save file";
-
-    return config_csv;
 }
 
 /** @brief Save configuration csv (in string form) to file and update global variables
@@ -220,6 +219,26 @@ int saveConfigFile(std::string config_csv) {
 
     //save it to config variable
     return saveConfig(config_csv) ? 2 : 0;
+}
+
+/** @brief Load config csv from a file or generate it if file does not exist and update global variables
+ * 
+ * @return config csv string on success, empty on failure
+ */
+int loadConfigFile(std::string *str) {
+    if (!LfsFileExists(CONFIG_PATH)) {
+        *str = buildConfigCsv(config);
+        saveConfigFile(*str);
+        return 0;
+    }
+
+    if (!LfsReadFile(CONFIG_PATH, str))
+        return 1;
+
+    if (saveConfig(*str))
+        return -2;
+
+    return 0;
 }
 
 
@@ -258,35 +277,12 @@ void drawRectangle(int y_min, int y_max, int x_min, int x_max, std::vector<uint8
 }
 
 
-
-//bool isBoxHalfCovered(const std::vector<std::vector<uint8_t>> &mask, int y_min, int y_max, int x_min, int x_max, int gridSize) {
-//    int gridCellSize = 320 / gridSize; // Assuming a 320x320 grid size
-//    int totalCells = 0;
-//    int nonToggledCells = 0;
-//
-//    // Iterate through cells within the bounding box
-//    for (int i = 0; i < )
-//    for (int i = ; i <= endX && i < gridSize; ++i) {
-//        for (int j = startY; j <= endY && j < gridSize; ++j) {
-//            totalCells++;
-//            if (mask[i][j] == 0) { // 0 represents non-toggled in this context
-//                nonToggledCells++;
-//            }
-//        }
-//    }
-//
-//    // Check if at least half of the cells are non-toggled
-//    return nonToggledCells >= totalCells / 2;
-//}
-
-
 // Helper function to check if the coordinates are inside the box.
-bool isInsideBox(int x, int y, int x_min, int x_max, int y_min, int y_max) {
+inline bool isInsideBox(int x, int y, int x_min, int x_max, int y_min, int y_max) {
     return (x >= x_min && x <= x_max && y >= y_min && y <= y_max);
 }
 
-bool isMasked(int x_min, int x_max, int y_min, int y_max, int image_size, const std::vector<uint8_t>& grid, int mask_size) {
-    
+bool isMasked(int x_min, int x_max, int y_min, int y_max, int image_size, const std::vector<uint8_t>& mask, int mask_size) {
     // Scale factor from the image size to grid size.
     const int scale = image_size / mask_size;
 
@@ -306,17 +302,14 @@ bool isMasked(int x_min, int x_max, int y_min, int y_max, int image_size, const 
                 int index = gridY * mask_size + gridX;
 
                 // Check if the cell is non-toggled
-                if (grid[index] == 0) {
-                    coveredCells++;
-                }
-
+                coveredCells += mask[index];
                 totalCells++;
             }
         }
     }
 
     // Check if at least half of the box is covered by non-toggled cells.
-    return coveredCells < totalCells / 2;
+    return coveredCells > totalCells / 2;
 }
 
 
@@ -345,7 +338,7 @@ bool hasChangedAverage(const std::vector<unsigned char>& currentImage, const std
         }
     }
 
-    printf("changed, pixelcnt: %ld %ld\n", changed, pixel_cnt);
+    //printf("changed, pixelcnt: %ld %ld\n", changed, pixel_cnt);
 
     return changed > (int32_t)std::round(pixel_cnt * count);
 }
@@ -362,8 +355,6 @@ float IoU(const bbox_t& a, const bbox_t& b) {
 
 //std::vector<tensorflow::Object> getResults(tflite::MicroInterpreter *interpreter, float threshold, float iou_threshold) {
 std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, float threshold, float iou_threshold, float fp_change, float fp_count) {
-    printf("%f %f %f %f\n", threshold, iou_threshold, fp_change, fp_count);
-    
     float *bboxes, *ids, *scores, *count;
     if (interpreter->output_tensor(2)->dims->size == 1) {
         scores = tflite::GetTensorData<float>(interpreter->output_tensor(0));
@@ -400,13 +391,6 @@ std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, float thre
         };
         tmp_results.push_back(bbox);
     }
-
-    //std::vector<tensorflow::Object> tmp_results, results;
-    //tmp_results = tensorflow::GetDetectionResults(interpreter, threshold);
-    //auto new_end = std::remove_if(tmp_results.begin(), tmp_results.end(), [](tensorflow::Object item) {
-    //    return item.id != 0;
-    //});
-    //tmp_results.erase(new_end, tmp_results.end());
 
     // nothing to sort with single result
     if (tmp_results.size() <= 1)
@@ -450,26 +434,20 @@ std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, float thre
         }
     }
 
-    printf("Total results vs final: %d vs %d\n", tmp_results.size(), results.size());
+    //printf("Total results vs final: %d vs %d\n", tmp_results.size(), results.size());
     return results;
 }
 
 
 //takes about 106-108ms
 static void detectTask(void *args) {
-    //TickType_t freq = 50;
-    //TickType_t prev = xTaskGetTickCount();
     status = 0;
     int clean = 0;
-
     int obj_cnt, det_thresh, iou_thresh, fp_change, fp_count, ret;
+    last_frame.resize(image.size(), 0);
 
     //TODO initial "calibration"
-
     while (true) {
-        //vTaskDelayUntil(&prev, freq);
-        int ticks = xTaskGetTickCount();
-
         // get frame
         if (xSemaphoreTake(image_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
             ret = CameraTask::GetSingleton()->GetFrame({frame});
@@ -509,6 +487,7 @@ static void detectTask(void *args) {
             continue ;
         }
 
+
         // get results and remove anything that is not a person
         if (xSemaphoreTake(config_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
             det_thresh = config.det_thresh;
@@ -526,12 +505,6 @@ static void detectTask(void *args) {
         obj_cnt = 0;
         if (xSemaphoreTake(result_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
             results = getResults(interpreter, det_thresh / 100.0f, iou_thresh / 100.0f, fp_change / 100.0f, fp_count / 100.0f);
-            //results = tensorflow::GetDetectionResults(interpreter, threshold);
-            //auto new_end = std::remove_if(results.begin(), results.end(), [](tensorflow::Object item) {
-            //    return item.id != 0;
-            //});
-            //results.erase(new_end, results.end());
-
             obj_cnt = results.size();
             xSemaphoreGive(result_mux);
             printf("%d objects\n", obj_cnt);
@@ -564,14 +537,12 @@ static void detectTask(void *args) {
         }
         else
             printf("failed to acquire det mutex\n");
-        
-        printf("total: %d\n", xTaskGetTickCount() - ticks);
     }
 }
 
 void setup() {
     status_mux = xSemaphoreCreateMutex();
-    image_mux = xSemaphoreCreateMutex();
+    image_mux  = xSemaphoreCreateMutex();
     result_mux = xSemaphoreCreateMutex();
     config_mux = xSemaphoreCreateMutex();
 
@@ -632,6 +603,17 @@ HttpServer::Content UriHandler(const char* uri) {
         else
             printf("failed to get res mutex\n");
 
+        int quality = 75;
+        int mask_size = 32; //TODO macro for contants
+        std::vector<uint8_t> mask;
+        if (xSemaphoreTake(config_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
+            quality   = config.jpeg_quality;
+            mask      = config.mask;
+            mask_size = config.mask_size;
+            xSemaphoreGive(config_mux);
+        }
+        else
+            printf("failed to acquire config mutex\n");
 
         for (auto result : res_copy) {
             //printf("%f %f %f %f\n", result.bbox.xmin, result.bbox.xmax, result.bbox.ymin, result.bbox.ymax);
@@ -640,22 +622,28 @@ HttpServer::Content UriHandler(const char* uri) {
             int ymin = result.ymin * image_size;
             int ymax = result.ymax * image_size;
 
-            // TODO reuse IoU calculations?
-            if (isMasked(xmin, xmax, ymin, ymax, image_size, config.mask, config.mask_size))
+            
+
+
+            if (isMasked(xmin, xmax, ymin, ymax, image_size, mask, mask_size))
                 drawRectangle(ymin, ymax, xmin, xmax, &img_copy, image_size, image_size, 0, 0, 255);
             else
                 drawRectangle(ymin, ymax, xmin, xmax, &img_copy, image_size, image_size, 0, 255, 0);
         }
 
         std::vector<uint8_t> jpeg;
-        //TODO jpeg quality
-        JpegCompressRgb(img_copy.data(), image_size, image_size, 75, &jpeg);
+        JpegCompressRgb(img_copy.data(), image_size, image_size, quality, &jpeg);
         return jpeg;
     }
 
-    else if (StrEndsWith(uri, CONFIG_WEB_PATH)) {
-        printf("Load not implemented yet");
-        return loadConfigFile();
+    else if (StrEndsWith(uri, CONFIG_LOAD_WEB_PATH)) {
+        std::string str;
+        int ret = loadConfigFile(&str);
+        if (ret) {
+            printf("Load failed\n");
+            return {};
+        }
+        return std::vector<uint8_t>(str.begin(), str.end());
     }
     else if (StrEndsWith(uri, CONFIG_RESET_WEB_PATH)) {
         printf("Load not implemented yet");
@@ -668,14 +656,13 @@ HttpServer::Content UriHandler(const char* uri) {
 std::string postUriHandler(std::string uri, std::vector<uint8_t> payload) {
     printf("on post finished\r\n");
 
-    if (StrEndsWith(uri, CONFIG_WEB_PATH)) {
-        for (size_t i = 0; i < payload.size(); i++)
-            printf("%c", payload[i]);
-        printf("\n");
-        if (payload.size() < 92) {
-            printf("invalid config payload\n");
+    if (StrEndsWith(uri, CONFIG_SAVE_WEB_PATH)) {
+        int ret = saveConfigFile(std::string(payload.begin(), payload.end()));
+        if (ret) {
+            printf("Failed to save config: %d\n", ret);
             return {};
         }
+
         return "/index.html";
     }
 
@@ -689,6 +676,7 @@ extern "C" void app_main(void* param) {
     (void)param;
 
     LedSet(Led::kStatus, true);
+    config.mask.resize(config.mask_size * config.mask_size, 0);
 
     // Try and get an IP
     std::optional<std::string> our_ip_addr;
@@ -747,34 +735,25 @@ extern "C" void app_main(void* param) {
 
     setup();
 
-    if (!LfsFileExists(CONFIG_PATH)) {
-        std::string cfg = std::to_string(config.mask_size) + ',';
-        config.mask.resize(config.mask_size * config.mask_size, 0);
-        for (auto val: config.mask)
-            cfg += std::to_string(val);
-        cfg += ',';
-        cfg += std::to_string(config.rotation)   + ',';
-        cfg += std::to_string(config.det_thresh) + ',';
-        cfg += std::to_string(config.iou_thresh) + ',';
-        cfg += std::to_string(config.fp_change)  + ',';
-        cfg += std::to_string(config.fp_count)   + ',';
-        cfg += std::to_string(config.jpeg_quality);
-
-        if (saveConfigFile(cfg)) {
-            printf("failed to create config file\n");
-            vTaskDelete(NULL);
-        }
-        printf("Config created:\n%s\n", cfg.c_str());
+    std::string cfg;
+    int ret = loadConfigFile(&cfg);
+    if (ret) {
+        printf("Failed to load config: %d\n", ret);
+        vTaskDelete(NULL);
     }
-    else {
-        printf("Config loaded:\n%s\n", loadConfigFile().c_str());
-    }
+    printf("Config loaded\n");
 
 
-    xTaskCreate(detectTask, "detect", 0x4000, nullptr, 3, &detect_task_handle);
+    xTaskCreate(detectTask, "detect", 8192, nullptr, 0, &detect_task_handle);
     PostHttpServer http_server;
     http_server.registerPostUriHandler(postUriHandler);
     http_server.AddUriHandler(UriHandler);
     UseHttpServer(&http_server);
+    
+    while(true) {
+        printf("ALIVE\n");
+        vTaskDelay(2000);
+    }
+
     vTaskSuspend(nullptr);
 }
