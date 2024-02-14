@@ -89,9 +89,7 @@ using namespace std;
 
 #define INDEX_FILE_NAME "/page.html"
 #define STREAM_PATH     "/camera_stream"
-#define LOAD_MASK_PATH  "/load_mask"
-#define SAVE_MASK_PATH  "/save_mask"
-#define SAVE_CONFIG_PATH "/save_config"
+#define CONFIG_PATH     "/config"
 
 //#define MODEL_PATH "/models/my_models/tf2_ssd_mobilenet_v2_coco17_ptq_edgetpu.tflite"
 #define MODEL_PATH "/model.tflite"
@@ -102,17 +100,20 @@ using namespace std;
 #define LOW_CONFIDENCE_RESULT -2
 
 
+#define IDX(x, y, width) (y * width + x) * 3;
+
+
+int image_size   = 320;
+int mask_size    = 32;
+float det_thresh = 0.5f;
+float iou_thresh = 0.5f;
+float fp_change  = 0.4f;
+float fp_count   = 0.05f;
+int rotation     = 3;
+std::vector<uint8_t> mask(mask_size * mask_size, 0);
+
 
 STATIC_TENSOR_ARENA_IN_SDRAM(tensor_arena, TENSOR_ARENA_SIZE);
-
-
-struct mask_struct {
-    int width;
-    int height;
-    std::vector<uint8_t> grid;
-};
-
-mask_struct image_mask;
 
 
 
@@ -165,48 +166,6 @@ void drawRectangle(int y_min, int y_max, int x_min, int x_max, std::vector<uint8
     drawVerticalLine(x_max, y_min, y_max, image, width, height, r, g, b);
 }
 
-void drawRectangle(std::vector<unsigned char>& image, int width, int height, int xmin, int ymin, int xmax, int ymax, const std::vector<unsigned char>& color) {
-    // Ensure color vector has exactly 3 elements (RGB).
-    if (color.size() != 3) return;
-
-    // Top and bottom edges.
-    for (int x = xmin; x <= xmax; x++) {
-        // Top edge
-        if (ymin >= 0 && ymin < height && x >= 0 && x < width) {
-            int topIndex = (ymin * width + x) * 3;
-            image[topIndex] = color[0];     // R
-            image[topIndex + 1] = color[1]; // G
-            image[topIndex + 2] = color[2]; // B
-        }
-        
-        // Bottom edge
-        if (ymax >= 0 && ymax < height && x >= 0 && x < width) {
-            int bottomIndex = (ymax * width + x) * 3;
-            image[bottomIndex] = color[0];     // R
-            image[bottomIndex + 1] = color[1]; // G
-            image[bottomIndex + 2] = color[2]; // B
-        }
-    }
-
-    // Left and right edges.
-    for (int y = ymin; y <= ymax; y++) {
-        // Left edge
-        if (xmin >= 0 && xmin < width && y >= 0 && y < height) {
-            int leftIndex = (y * width + xmin) * 3;
-            image[leftIndex] = color[0];     // R
-            image[leftIndex + 1] = color[1]; // G
-            image[leftIndex + 2] = color[2]; // B
-        }
-        
-        // Right edge
-        if (xmax >= 0 && xmax < width && y >= 0 && y < height) {
-            int rightIndex = (y * width + xmax) * 3;
-            image[rightIndex] = color[0];     // R
-            image[rightIndex + 1] = color[1]; // G
-            image[rightIndex + 2] = color[2]; // B
-        }
-    }
-}
 
 
 //bool isBoxHalfCovered(const std::vector<std::vector<uint8_t>> &mask, int y_min, int y_max, int x_min, int x_max, int gridSize) {
@@ -261,10 +220,10 @@ bool isInsideBox(int x, int y, int x_min, int x_max, int y_min, int y_max) {
     return (x >= x_min && x <= x_max && y >= y_min && y <= y_max);
 }
 
-bool isMasked(int x_min, int x_max, int y_min, int y_max, const std::vector<uint8_t>& grid) {
+bool isMasked(int x_min, int x_max, int y_min, int y_max, int image_size, const std::vector<uint8_t>& grid, int mask_size) {
     
     // Scale factor from the image size to grid size.
-    const int scale = 320 / 32;
+    const int scale = image_size / mask_size;
 
     int coveredCells = 0;
     int totalCells = 0;
@@ -278,10 +237,10 @@ bool isMasked(int x_min, int x_max, int y_min, int y_max, const std::vector<uint
 
             // Check if the current point is inside the box.
             if (isInsideBox(gridX, gridY, x_min/scale, x_max/scale, y_min/scale, y_max/scale)) {
-                // Index in the grid (assuming row-major order).
-                int index = gridY * 32 + gridX;
+                // Index in the grid
+                int index = gridY * mask_size + gridX;
 
-                // Check if the cell is non-toggled (assuming 0 is non-toggled).
+                // Check if the cell is non-toggled
                 if (grid[index] == 0) {
                     coveredCells++;
                 }
@@ -302,16 +261,12 @@ tflite::MicroErrorReporter error_reporter;
 
 std::vector<uint8_t> image;
 CameraFrameFormat frame;
-int width;
-int height;
 
 SemaphoreHandle_t status_mux;
 SemaphoreHandle_t image_mux;
 SemaphoreHandle_t result_mux;
+SemaphoreHandle_t config_mux;
 int status;
-
-float threshold     = 0.5f;
-float iou_threshold = 0.25f;
 
 TaskHandle_t detect_task_handle; // detector task handle
 
@@ -341,10 +296,8 @@ void setStatus(int s) {
 }
 
 
-#define IDX(x, y, width) (y * width + x) * 3;
-
 // Function to check if the specified region has changed significantly - average color approach
-bool hasChangedAverage(const std::vector<unsigned char>& currentImage, const std::vector<unsigned char>& previousImage, int width, int height, int xmin, int ymin, int xmax, int ymax, int change, float count) {
+bool hasChangedAverage(const std::vector<unsigned char>& currentImage, const std::vector<unsigned char>& previousImage, int width, int height, int xmin, int ymin, int xmax, int ymax, float change, float count) {
     int32_t changed = 0;
     int32_t pixel_cnt = (xmax - xmin + 1) * (ymax - ymin + 1);
     for (int y = ymin; y <= ymax; ++y) {
@@ -353,12 +306,12 @@ bool hasChangedAverage(const std::vector<unsigned char>& currentImage, const std
             int pixel_change = std::abs(currentImage[index] - previousImage[index]) +
                                std::abs(currentImage[index + 1] - previousImage[index + 1]) +
                                std::abs(currentImage[index + 2] - previousImage[index + 2]);
-            if (pixel_change > change)
+            if (pixel_change > 255 * change)
                 changed++;
         }
     }
 
-    printf("changed, pixelcnt: %d %d\n", changed, pixel_cnt);
+    printf("changed, pixelcnt: %ld %ld\n", changed, pixel_cnt);
 
     return changed > (int32_t)std::round(pixel_cnt * count);
 }
@@ -374,7 +327,9 @@ float IoU(const bbox_t& a, const bbox_t& b) {
 }
 
 //std::vector<tensorflow::Object> getResults(tflite::MicroInterpreter *interpreter, float threshold, float iou_threshold) {
-std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, float threshold, float iou_threshold) {
+std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, float threshold, float iou_threshold, float fp_change, float fp_count) {
+    printf("%f %f %f %f\n", threshold, iou_threshold, fp_change, fp_count);
+    
     float *bboxes, *ids, *scores, *count;
     if (interpreter->output_tensor(2)->dims->size == 1) {
         scores = tflite::GetTensorData<float>(interpreter->output_tensor(0));
@@ -438,17 +393,17 @@ std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, float thre
         // NMS
         // probably not required as the model has it inside
         // go through remaining box and check if there are any that overlap with the current box and have lower score
-        //for (auto it = indices.begin(); it != indices.end(); ) {
-        //    //if (IoU(current_box.bbox, tmp_results[*it].bbox) > iou_threshold)
-        //    if (IoU(current_box, tmp_results[*it]) > iou_threshold)
-        //        it = indices.erase(it);
-        //    else
-        //        it++;
-        //}
+        for (auto it = indices.begin(); it != indices.end(); ) {
+            //if (IoU(current_box.bbox, tmp_results[*it].bbox) > iou_threshold)
+            if (IoU(current_box, tmp_results[*it]) > iou_threshold)
+                it = indices.erase(it);
+            else
+                it++;
+        }
 
         // ignore boxes with not enough change
         if (xSemaphoreTake(image_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
-        if (hasChangedAverage(image, last_frame, width, height, current_box.xmin * width, current_box.ymin * width, current_box.xmax * width, current_box.ymax * width, 100, 0.05f))
+        if (hasChangedAverage(image, last_frame, image_size, image_size, current_box.xmin * image_size, current_box.ymin * image_size, current_box.xmax * image_size, current_box.ymax * image_size, fp_change, fp_count))
             results.push_back(current_box);
         else
             printf("Probably false positive\n");
@@ -530,7 +485,7 @@ static void detectTask(void *args) {
         // get results and remove anything that is not a person
         int obj_cnt = 0;
         if (xSemaphoreTake(result_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
-            results = getResults(interpreter, threshold, iou_threshold);
+            results = getResults(interpreter, det_thresh, iou_thresh, fp_change, fp_count);
             //results = tensorflow::GetDetectionResults(interpreter, threshold);
             //auto new_end = std::remove_if(results.begin(), results.end(), [](tensorflow::Object item) {
             //    return item.id != 0;
@@ -578,29 +533,18 @@ void setup() {
     status_mux = xSemaphoreCreateMutex();
     image_mux = xSemaphoreCreateMutex();
     result_mux = xSemaphoreCreateMutex();
+    config_mux = xSemaphoreCreateMutex();
 
     auto input_tensor = interpreter->input_tensor(0);
-    height  = input_tensor->dims->data[1];
-    width   = input_tensor->dims->data[2];
-    printf("Input dimensions: %d %d\n", width, height);
-
-    if (input_tensor->quantization.type) {
-        printf("input is quantized\n");
-        auto params = (TfLiteAffineQuantization *)input_tensor->quantization.params;
-        printf("dim: %d\nscale: %f\nzero-point: %d\n", params->quantized_dimension, params->scale, params->zero_point);
+    if (input_tensor->dims->data[1] != input_tensor->dims->data[2]) {
+        printf("Model input is not square. Exiting...\n");
+        vTaskDelete(NULL);
     }
-
-    auto output_tensor = interpreter->output_tensor(0);
-
-    if (output_tensor->quantization.type) {
-        printf("output is quantized\n");
-        auto params = (TfLiteAffineQuantization *)output_tensor->quantization.params;
-        printf("dim: %d\nscale: %f\nzero-point: %d\n", params->quantized_dimension, params->scale, params->zero_point);
-    }
+    image_size  = input_tensor->dims->data[1];
+    printf("Input tensor size: %d %d\n", image_size, image_size);
 
     // create and save image storages
-    image.resize(width * height * CameraFormatBpp(CameraFormat::kRgb), 0);
-
+    image.resize(image_size * image_size * CameraFormatBpp(CameraFormat::kRgb), 0);
     printf("%d\n", image.capacity());
 
     // create frames for model and preview image
@@ -608,8 +552,8 @@ void setup() {
         CameraFormat::kRgb,
         CameraFilterMethod::kBilinear,
         CameraRotation::k270,
-        width,
-        height,
+        image_size,
+        image_size,
         true,
         image.data(),
         true
@@ -651,81 +595,48 @@ HttpServer::Content UriHandler(const char* uri) {
 
         for (auto result : res_copy) {
             //printf("%f %f %f %f\n", result.bbox.xmin, result.bbox.xmax, result.bbox.ymin, result.bbox.ymax);
-            int xmin = result.xmin * width;
-            int xmax = result.xmax * width;
-            int ymin = result.ymin * height;
-            int ymax = result.ymax * height;
+            int xmin = result.xmin * image_size;
+            int xmax = result.xmax * image_size;
+            int ymin = result.ymin * image_size;
+            int ymax = result.ymax * image_size;
 
-            if (isMasked(xmin, xmax, ymin, ymax, image_mask.grid)) {
-                drawRectangle(ymin, ymax, xmin, xmax, &img_copy, width, height, 0, 0, 255);
-                //drawRectangle(img_copy, width, height, xmin, ymin, xmax, ymax, {0, 0, 255});
-            }
+            // TODO reuse IoU calculations?
+            if (isMasked(xmin, xmax, ymin, ymax, image_size, mask, mask_size))
+                drawRectangle(ymin, ymax, xmin, xmax, &img_copy, image_size, image_size, 0, 0, 255);
             else
-                drawRectangle(ymin, ymax, xmin, xmax, &img_copy, width, height, 0, 255, 0);
-                //drawRectangle(img_copy, width, height, xmin, ymin, xmax, ymax, {0, 255, 0});
+                drawRectangle(ymin, ymax, xmin, xmax, &img_copy, image_size, image_size, 0, 255, 0);
         }
 
         std::vector<uint8_t> jpeg;
-        JpegCompressRgb(img_copy.data(), width, height, 75, &jpeg);
+        //TODO jpeg quality
+        JpegCompressRgb(img_copy.data(), image_size, image_size, 75, &jpeg);
         return jpeg;
     }
-    else if (StrEndsWith(uri, LOAD_MASK_PATH)) {
+    else if (StrEndsWith(uri, CONFIG_PATH)) {
         printf("Load not implemented yet");
-        return {};
-    }
-    else if (StrEndsWith(uri, SAVE_MASK_PATH)) {
-        printf("Save not implemented yet");
         return {};
     }
 
     return {};
 }
 
-int onPostFinished(payload_uri_t payload_uri) {
+std::string postUriHandler(std::string uri, std::vector<uint8_t> payload) {
     printf("on post finished\r\n");
 
-    if (StrEndsWith(payload_uri.uri, SAVE_CONFIG_PATH)) {
-        printf("save config\n");
-        for (size_t i = 0; i < payload_uri.payload.size(); i++)
-            printf("%c", payload_uri.payload[i]);
+    if (StrEndsWith(uri, CONFIG_PATH)) {
+        for (size_t i = 0; i < payload.size(); i++)
+            printf("%c", payload[i]);
         printf("\n");
-        return 200;
+        if (payload.size() < 92) {
+            printf("invalid config payload\n");
+            return std::string();
+        }
+        return "/index.html";
     }
 
-    if (StrEndsWith(payload_uri.uri, SAVE_MASK_PATH)) {
-        if (payload_uri.payload.size() <= 0) {
-            printf("Invalid payload size");
-            return 200;
-        }
+    printf("unhandled uri: %s\n", uri.c_str());
 
-        //TODO I am currently expecting the payload to be in valid format
-        auto i = find(payload_uri.payload.begin(), payload_uri.payload.end(), ',');
-        int start = 0;
-        int end = i - payload_uri.payload.begin();
-        image_mask.width = numericalVectorToInt(payload_uri.payload, start, end);
-
-        start = end + 1;
-        i = find(payload_uri.payload.begin() + start, payload_uri.payload.end(), ',');
-        end = i - payload_uri.payload.begin();
-        image_mask.height = numericalVectorToInt(payload_uri.payload, start, end);
-
-        start = end + 1;
-
-        image_mask.grid.clear();
-        image_mask.grid.reserve(image_mask.height * image_mask.width);
-        for (int i = 0; i < image_mask.height * image_mask.width; i++)
-            image_mask.grid.push_back(payload_uri.payload[start + i] - '0');
-
-        printf("Width: %u\r\n", image_mask.width);
-        printf("Heigth: %u\r\n", image_mask.height);
-        printf("Data: ");
-        for (int i = 0; i < image_mask.grid.size(); i++) {
-            printf("%u", image_mask.grid[i]);
-        }
-        printf("\r\n");
-    }
-
-    return 404;
+    return std::string();
 }
 
 
@@ -747,12 +658,36 @@ extern "C" void app_main(void* param) {
         return;
     }
 
-    //initialize default mask
-    image_mask.height = 32;
-    image_mask.width = 32;
-    image_mask.grid.reserve(image_mask.height);
-    for (int i = 0; i < image_mask.height * image_mask.width; i++)
-        image_mask.grid.push_back(0);
+    //load/create all required files
+    //if (!LfsFileExists("/ok.txt")) {
+    //    if (LfsWriteFile("/ok.txt", "ok"))
+    //        printf("ok created\n");
+    //    else
+    //        printf("failed to create ok\n");
+    //}
+    if (!LfsFileExists("/cfg.json")) {
+        std::string cfg = "{";
+        cfg += "\"maskSize\":" + std::to_string(mask_size);  //num
+        cfg += "\"mask\":\"";
+        for (int i = 0; i < mask.size(); i++)
+            cfg += std::to_string(mask[i]);
+        cfg += "\"";
+        cfg += "\"rotation\":"  + std::to_string(rotation);   //num
+        cfg += "\"detThresh\":" + std::to_string(det_thresh); //num
+        cfg += "\"iouThresh\":" + std::to_string(iou_thresh); //num
+        cfg += "\"fpChange\":"  + std::to_string(fp_change);  //num
+        cfg += "\"fpCount\":"   + std::to_string(fp_count);   //num
+        cfg += "}";
+        if (LfsWriteFile("/cfg.json", cfg))
+            printf("cfg created\n");
+        else
+            printf("failed to create cfg\n");
+    }
+
+    std::string buf;
+    if (LfsReadFile("/cfg.json", &buf)) {
+        printf("Saved config:\n%s\n", buf.c_str());
+    }
 
 
     tflite::MicroErrorReporter error_reporter;
@@ -800,7 +735,7 @@ extern "C" void app_main(void* param) {
 
     xTaskCreate(detectTask, "detect", 0x4000, nullptr, 3, &detect_task_handle);
     PostHttpServer http_server;
-    http_server.registerPostFinishedCallback(onPostFinished);
+    http_server.registerPostUriHandler(postUriHandler);
     http_server.AddUriHandler(UriHandler);
     UseHttpServer(&http_server);
     vTaskSuspend(nullptr);

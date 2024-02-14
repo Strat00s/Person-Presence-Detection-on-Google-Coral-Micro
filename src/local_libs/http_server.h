@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <unordered_set>
 #include <tuple>
+#include <string>
 #include "libs/base/http_server.h"
 #include "libs/base/strings.h"
 
@@ -15,23 +16,24 @@ using namespace coralmicro;
 typedef struct {
     std::string uri;
     std::vector<uint8_t> payload;
-} payload_uri_t;
+} uri_payload_t;
 
 //Http server with post support
 class PostHttpServer : public HttpServer {
   private:
-    std::map<void*, payload_uri_t> payload_buffer;              //payload buffers while processing payloads
+    std::map<void*, uri_payload_t> payload_buffer;              //payload buffers while processing payloads
     //std::unordered_set<std::string> post_paths;                 //supported post paths
-    int (*postFinishedCallback)(payload_uri_t payload_uri);    //function to call once all data are saved
+    std::string (*postUriHandlerCallback)(std::string uri, std::vector<uint8_t> payload);    //function to call once all data are saved
 
   public:
 
-    /** @brief Register a callback function which should be executed once POST is finished
+    /** @brief Register a callback which will be called on POST finished with URI and payload.
      * 
-     * @param func Function to call with argument of type payload_uri_t
+     * @param func Function to call with argument of type uri_payload_t
+     * @return path of a file to be return as a 200 response body. If no path is given (empty string), 404 will be returned instead.
      */
-    void registerPostFinishedCallback(int (*func)(payload_uri_t)) {
-        postFinishedCallback = func;
+    void registerPostUriHandler(std::string (*func)(std::string, std::vector<uint8_t>)) {
+        postUriHandlerCallback = func;
     }
 
     /** @brief Add post path for which post are accepted
@@ -114,9 +116,11 @@ class PostHttpServer : public HttpServer {
         // write a file path to the response_uri of a file that is stored inside the device in its fs (/index.html for example is the main web page)
 
         //call callback
-        int res = postFinishedCallback(payload_buffer[connection]);
-        if (res >= 200 && res < 300)
-            snprintf(response_uri, response_uri_len, "/index.html");
+        std::string path = postUriHandlerCallback(payload_buffer[connection].uri, payload_buffer[connection].payload);
+        if (path.size()) {
+            printf("%s\n", path.c_str());
+            snprintf(response_uri, response_uri_len, "%s", path.c_str());
+        }
 
         //remove current buffer
         payload_buffer.erase(connection);

@@ -160,8 +160,8 @@
 
     var maskSize = 32; //current mask size (cell count per dimension)
     var rotation = 0;
-    var detection = 0.5;
-    var iou = 0.5;
+    var detThresh = 0.5;
+    var iouThresh = 0.5;
     var fpChange = 0.4;
     var fpCount = 0.05;
 
@@ -231,14 +231,14 @@
     }
 
     function loadSettings() {
-      getData("/config")
+      getData(configUrl)
         .then(config => {
           console.log("Settings loaded");
           maskSize = config["maskSize"];
           mask = config["mask"];
           rotation = config["rotation"];
-          detection = config["detection"];
-          iou = config["iou"];
+          detThresh = config["detThresh"];
+          iouThresh = config["iouThresh"];
           fpChange = config["fpChange"];
           fpCount = config["fpCount"];
         })
@@ -256,12 +256,12 @@
         "maskSize": maskSize,
         "mask": maskVal,
         "rotation": rotation,
-        "detection": detection,
-        "iou": iou,
+        "detThresh": detThresh,
+        "iouThresh": iouThresh,
         "fpChange": fpChange,
         "fpCount": fpCount,
       }
-      postData("/save_config", "application/json", JSON.stringify(data))
+      postData(configUrl, "application/json", JSON.stringify(data))
         .then(console.log("Settings saved"))
         .catch(error => console.error("Failed to save config: ", error));
     }
