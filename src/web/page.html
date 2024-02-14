@@ -140,8 +140,8 @@
 
     <div class="settings-group">
       <button id="saveToDevice" onclick="saveSettings()">Save config</button>
-      <button id="loadFromDevice" onclick="">Load config</button>
-      <button id="resetFromDevice" onclick="">Reset config</button>
+      <button id="loadFromDevice" onclick="loadSettings()">Load config</button>
+      <button id="resetFromDevice" onclick="resetSettings()">Reset config</button>
     </div>
 
     <div class="settings-group">
@@ -155,16 +155,17 @@
   <script>
     const imgUrl = "/camera_stream"; //get
     const configUrl = "/config"; //get set
+    const configResetUrl = "/config_reset";
     const statusUrl = "/status";
-    const imageSize = 320;
 
+    var imageSize = 320;
     var maskSize = 32; //current mask size (cell count per dimension)
-    var rotation = 0;
-    var detThresh = 0.5;
-    var iouThresh = 0.5;
-    var fpChange = 0.4;
-    var fpCount = 0.05;
-
+    var rotation = 3;
+    var detThresh = 50;
+    var iouThresh = 50;
+    var fpChange = 40;
+    var fpCount = 5;
+    var jpegQuality = 75;
 
 
     //mask [0] -> mask values
@@ -234,13 +235,14 @@
       getData(configUrl)
         .then(config => {
           console.log("Settings loaded");
-          maskSize = config["maskSize"];
-          mask = config["mask"];
-          rotation = config["rotation"];
-          detThresh = config["detThresh"];
-          iouThresh = config["iouThresh"];
-          fpChange = config["fpChange"];
-          fpCount = config["fpCount"];
+          console.log("CSV parser not done yet");
+          //maskSize = config["maskSize"];
+          //mask = config["mask"];
+          //rotation = config["rotation"];
+          //detThresh = config["detThresh"];
+          //iouThresh = config["iouThresh"];
+          //fpChange = config["fpChange"];
+          //fpCount = config["fpCount"];
         })
         .catch(error => console.error("Failed to load config: ", error));
     }
@@ -252,20 +254,34 @@
           maskVal += item.toString();
         })
       })
-      var data = {
-        "maskSize": maskSize,
-        "mask": maskVal,
-        "rotation": rotation,
-        "detThresh": detThresh,
-        "iouThresh": iouThresh,
-        "fpChange": fpChange,
-        "fpCount": fpCount,
-      }
-      postData(configUrl, "application/json", JSON.stringify(data))
+      var data = maskSize.toString() + ",";
+      data += maskVal                + ",";
+      data += rotation.toString()    + ",";
+      data += detThresh.toString()   + ",";
+      data += iouThresh.toString()   + ",";
+      data += fpChange.toString()    + ",";
+      data += fpCount.toString()     + ",";
+      data += jpegQuality.toString();
+      postData(configUrl, "text/plain", data)
         .then(console.log("Settings saved"))
         .catch(error => console.error("Failed to save config: ", error));
     }
 
+    function loadSettings() {
+      getData(configResetUrl)
+        .then(config => {
+          console.log("Settings reset loaded");
+          console.log("CSV parser not done yet");
+          //maskSize = config["maskSize"];
+          //mask = config["mask"];
+          //rotation = config["rotation"];
+          //detThresh = config["detThresh"];
+          //iouThresh = config["iouThresh"];
+          //fpChange = config["fpChange"];
+          //fpCount = config["fpCount"];
+        })
+        .catch(error => console.error("Failed to load config: ", error));
+    }
 
     function toggleMask() {
       var grid = document.getElementById('gridCanvas');

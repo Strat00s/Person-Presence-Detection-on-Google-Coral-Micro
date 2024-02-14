@@ -49,12 +49,10 @@ for (int i = 0; i < box_cnt; i++) {
 
 #include <cstdio>
 #include <vector>
-#include <numeric>
 #include <algorithm>
-#include <deque>
 #include <cmath>
+#include <numeric>
 
-#include "libs/base/timer.h"
 #include "libs/base/http_server.h"
 #include "libs/base/led.h"
 #include "libs/base/strings.h"
@@ -64,15 +62,12 @@ for (int i = 0; i < box_cnt; i++) {
 #include "third_party/freertos_kernel/include/FreeRTOS.h"
 #include "third_party/freertos_kernel/include/task.h"
 #include "libs/base/filesystem.h"
-//#include "libs/rpc/rpc_http_server.h"
-#include "libs/tensorflow/posenet.h"
-#include "libs/tensorflow/posenet_decoder_op.h"
+#include "libs/tensorflow/utils.h"
 #include "libs/tpu/edgetpu_manager.h"
 #include "third_party/tflite-micro/tensorflow/lite/micro/micro_error_reporter.h"
 #include "third_party/tflite-micro/tensorflow/lite/micro/micro_interpreter.h"
 #include "third_party/tflite-micro/tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "libs/base/gpio.h"
-#include "libs/tensorflow/detection.h"
 #include "libs/tpu/edgetpu_op.h"
 
 #include "libs/base/ethernet.h"
@@ -87,49 +82,144 @@ using namespace coralmicro;
 using namespace std;
 
 
-#define INDEX_FILE_NAME "/page.html"
-#define STREAM_PATH     "/camera_stream"
-#define CONFIG_PATH     "/config"
-
-//#define MODEL_PATH "/models/my_models/tf2_ssd_mobilenet_v2_coco17_ptq_edgetpu.tflite"
-#define MODEL_PATH "/model.tflite"
-
-
-#define TENSOR_ARENA_SIZE     8 * 1024 * 1024
-#define CONFIDENCE_THRESHOLD  0.5f
-#define LOW_CONFIDENCE_RESULT -2
-
+#define MAIN_WEB_PATH         "/page.html"
+#define STREAM_WEB_PATH       "/camera_stream"
+#define CONFIG_WEB_PATH       "/config"
+#define CONFIG_RESET_WEB_PATH "/config_reset"
+#define MODEL_PATH            "/model.tflite"
+#define CONFIG_PATH           "/cfg.csv"
 
 #define IDX(x, y, width) (y * width + x) * 3;
 
-
-int image_size   = 320;
-int mask_size    = 32;
-float det_thresh = 0.5f;
-float iou_thresh = 0.5f;
-float fp_change  = 0.4f;
-float fp_count   = 0.05f;
-int rotation     = 3;
-std::vector<uint8_t> mask(mask_size * mask_size, 0);
-
-
+#define TENSOR_ARENA_SIZE     8 * 1024 * 1024
 STATIC_TENSOR_ARENA_IN_SDRAM(tensor_arena, TENSOR_ARENA_SIZE);
 
 
+int image_size   = 320;
+typedef struct {
+    int mask_size = 32;
+    std::vector<uint8_t> mask;
+    int rotation = 3;
+    int det_thresh = 50;
+    int iou_thresh = 50;
+    int fp_change = 40;
+    int fp_count = 5;
+    int jpeg_quality = 75;
+} cfg_t;
+cfg_t config;
 
-void appendToVector(std::vector<uint8_t> &dst, const char *str, size_t length) {
-    dst.reserve(dst.size() + length);
-    for (size_t i = 0; i < length; i++) {
-        dst.push_back(str[i]);
+
+tflite::MicroMutableOpResolver<3> resolver;
+tflite::MicroInterpreter *interpreter;
+tflite::MicroErrorReporter error_reporter;
+
+std::vector<uint8_t> image;
+CameraFrameFormat frame;
+
+SemaphoreHandle_t status_mux;
+SemaphoreHandle_t image_mux;
+SemaphoreHandle_t result_mux;
+SemaphoreHandle_t config_mux;
+int status;
+
+TaskHandle_t detect_task_handle; // detector task handle
+
+std::vector<uint8_t> last_frame; // last empty frame before any detection happens
+int detected = 0;
+
+
+typedef struct {
+    float ymin;
+    float xmin;
+    float ymax;
+    float xmax;
+    float score;
+} bbox_t;
+std::vector<bbox_t> results;
+
+
+/** @brief Partse config csv string and save it to global variables
+ * 
+ * @param config_csv string with valid csv
+ * @return 0 on success, 1 on failure to acquire mutex 
+*/
+int saveConfig(std::string config_csv) {
+    if (std::count(config_csv.begin(), config_csv.end(), ',') < 7)
+        return 2;
+
+    int field_num = 0;
+    size_t start = 0;
+    size_t end = config_csv.find(',');
+    cfg_t new_config;
+    new_config.mask.resize(new_config.mask_size * new_config.mask_size, 0);
+
+    while (end != std::string::npos) {
+        std::string field_val = config_csv.substr(start, end - start);
+        printf("%d %s %d %d\n", field_num, field_val.c_str(), start, end);
+
+        start = end + 1;
+        end = config_csv.find(',', start);
+
+        if (field_val.size() == 0)
+            continue;
+    
+        switch (field_num++) {
+            case 0: new_config.mask_size = std::stoi(field_val); break;
+            case 1: {
+                new_config.mask.resize(field_val.size());
+                for (size_t i = 0; i < field_val.size(); i++)
+                    new_config.mask[i] = field_val[i] == '1';
+                break;
+            }
+            case 2: new_config.rotation     = std::stoi(field_val); break;
+            case 3: new_config.det_thresh   = std::stoi(field_val); break;
+            case 4: new_config.iou_thresh   = std::stoi(field_val); break;
+            case 5: new_config.fp_change    = std::stoi(field_val); break;
+            case 6: new_config.fp_count     = std::stoi(field_val); break;
+            case 7: new_config.jpeg_quality = std::stoi(field_val); break;
+            default: printf("Unhandled field %d: %s\n", field_num, field_val.c_str()); break;
+        }
     }
+
+    if (xSemaphoreTake(config_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
+        config = new_config;
+        xSemaphoreGive(config_mux);
+        return 0;
+    }
+    printf("Failed to get config mutex\n");
+    return 1;
 }
 
-void appendToVector(std::vector<uint8_t> &dst, std::vector<uint8_t> &src) {
-    printf("dst size: %d src size: %d\r\n", dst.size(), src.size());
-    dst.reserve(dst.size() + src.size());
-    for (size_t i = 0; i < src.size(); i++) {
-        dst.push_back(src[i]);
-    }
+/** @brief Load configuration csv from a file and update global variables
+ * 
+ * @return config csv string on success, empty on failure
+ */
+std::string loadConfigFile() {
+    if (!LfsFileExists(CONFIG_PATH))
+        return "File does not exist";
+
+    std::string config_csv;
+    if (!LfsReadFile(CONFIG_PATH, &config_csv))
+        return "Failed to read file";
+
+    if (saveConfig(config_csv))
+        return "Failed to save file";
+
+    return config_csv;
+}
+
+/** @brief Save configuration csv (in string form) to file and update global variables
+ * 
+ * @param config_csv csv string
+ * @return int 0 on success, 1 on failure to write to file, 2 when failed to update global variables
+ */
+int saveConfigFile(std::string config_csv) {
+    //write the csv string to file
+    if (!LfsWriteFile(CONFIG_PATH, config_csv))
+        return 1;
+
+    //save it to config variable
+    return saveConfig(config_csv) ? 2 : 0;
 }
 
 
@@ -151,6 +241,7 @@ void drawVerticalLine(int x, int y_min, int y_max, std::vector<uint8_t> *image, 
     }
 }
 
+//TODO make more efficient version
 void drawRectangle(int y_min, int y_max, int x_min, int x_max, std::vector<uint8_t> *image, int width, int height, uint8_t r = 0, uint8_t g = 255, uint8_t b = 0) {
     if (y_min > height)
         y_min = height;
@@ -187,32 +278,6 @@ void drawRectangle(int y_min, int y_max, int x_min, int x_max, std::vector<uint8
 //    // Check if at least half of the cells are non-toggled
 //    return nonToggledCells >= totalCells / 2;
 //}
-
-
-/** @brief Convert numerical characters in a vector to single integer
- * 
- * @param data vector containing the integer 
- * @param start starting index for converion
- * @param end convert int up to this index (not included)
- * @return 
- */
-int numericalVectorToInt(std::vector<uint8_t> data, size_t start, size_t end) {
-    printf("start end %d %d\r\n", start, end);
-    
-    if (end - start > INT_MAX)
-        return 0;
-    
-    int result = 0;
-    int mul = 1;
-    for (size_t i = 0; i < end - start; i++) {
-        char c = data[end - i - 1];
-        printf("%c %u\r\n", c, c - '0');
-        result += (c - '0') * mul;
-        mul *= 10;
-    }
-
-    return result;
-}
 
 
 // Helper function to check if the coordinates are inside the box.
@@ -255,37 +320,7 @@ bool isMasked(int x_min, int x_max, int y_min, int y_max, int image_size, const 
 }
 
 
-tflite::MicroMutableOpResolver<3> resolver;
-tflite::MicroInterpreter *interpreter;
-tflite::MicroErrorReporter error_reporter;
-
-std::vector<uint8_t> image;
-CameraFrameFormat frame;
-
-SemaphoreHandle_t status_mux;
-SemaphoreHandle_t image_mux;
-SemaphoreHandle_t result_mux;
-SemaphoreHandle_t config_mux;
-int status;
-
-TaskHandle_t detect_task_handle; // detector task handle
-
-std::vector<uint8_t> last_frame; // last empty frame before any detection happens
-//std::deque<std::vector<uint8_t>>
-int detected = 0;
-
-
-typedef struct {
-    float ymin;
-    float xmin;
-    float ymax;
-    float xmax;
-    float score;
-} bbox_t;
-std::vector<bbox_t> results;
-//std::vector<tensorflow::Object> results;
-
-
+//TODO move into own class
 void setStatus(int s) {
     if (xSemaphoreTake(status_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
         status = s;
@@ -294,7 +329,6 @@ void setStatus(int s) {
     else
         printf("failed to acquire det mutex\n");
 }
-
 
 // Function to check if the specified region has changed significantly - average color approach
 bool hasChangedAverage(const std::vector<unsigned char>& currentImage, const std::vector<unsigned char>& previousImage, int width, int height, int xmin, int ymin, int xmax, int ymax, float change, float count) {
@@ -403,12 +437,12 @@ std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, float thre
 
         // ignore boxes with not enough change
         if (xSemaphoreTake(image_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
-        if (hasChangedAverage(image, last_frame, image_size, image_size, current_box.xmin * image_size, current_box.ymin * image_size, current_box.xmax * image_size, current_box.ymax * image_size, fp_change, fp_count))
-            results.push_back(current_box);
-        else
-            printf("Probably false positive\n");
-            xSemaphoreGive(image_mux);
-        }
+            if (hasChangedAverage(image, last_frame, image_size, image_size, current_box.xmin * image_size, current_box.ymin * image_size, current_box.xmax * image_size, current_box.ymax * image_size, fp_change, fp_count))
+                results.push_back(current_box);
+            else
+                printf("Probably false positive\n");
+                xSemaphoreGive(image_mux);
+            }
         else {
             printf("failed to acquire img mutex\n");
             setStatus(-80);
@@ -423,26 +457,20 @@ std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, float thre
 
 //takes about 106-108ms
 static void detectTask(void *args) {
-    TickType_t freq = 50;
-    TickType_t prev = xTaskGetTickCount();
+    //TickType_t freq = 50;
+    //TickType_t prev = xTaskGetTickCount();
     status = 0;
     int clean = 0;
 
-    if (xSemaphoreTake(image_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
-        CameraTask::GetSingleton()->GetFrame({frame});
-        last_frame = image;
-        xSemaphoreGive(image_mux);
-    }
-    else {
-        printf("failed to acquire img mutex\n");
-    }
+    int obj_cnt, det_thresh, iou_thresh, fp_change, fp_count, ret;
+
+    //TODO initial "calibration"
 
     while (true) {
         //vTaskDelayUntil(&prev, freq);
         int ticks = xTaskGetTickCount();
 
         // get frame
-        int ret;
         if (xSemaphoreTake(image_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
             ret = CameraTask::GetSingleton()->GetFrame({frame});
             xSemaphoreGive(image_mux);
@@ -468,7 +496,6 @@ static void detectTask(void *args) {
             continue;
         }
 
-
         // run model
         if (interpreter->Invoke() != kTfLiteOk) {
             printf("Invoke failed\n");
@@ -483,9 +510,22 @@ static void detectTask(void *args) {
         }
 
         // get results and remove anything that is not a person
-        int obj_cnt = 0;
+        if (xSemaphoreTake(config_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
+            det_thresh = config.det_thresh;
+            iou_thresh = config.iou_thresh;
+            fp_change = config.fp_change;
+            fp_count = config.fp_count;
+            xSemaphoreGive(config_mux);
+        }
+        else {
+            printf("failed to acquire config mutex\n");
+            setStatus(-5);
+            continue;
+        }
+
+        obj_cnt = 0;
         if (xSemaphoreTake(result_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
-            results = getResults(interpreter, det_thresh, iou_thresh, fp_change, fp_count);
+            results = getResults(interpreter, det_thresh / 100.0f, iou_thresh / 100.0f, fp_change / 100.0f, fp_count / 100.0f);
             //results = tensorflow::GetDetectionResults(interpreter, threshold);
             //auto new_end = std::remove_if(results.begin(), results.end(), [](tensorflow::Object item) {
             //    return item.id != 0;
@@ -562,9 +602,9 @@ void setup() {
 
 HttpServer::Content UriHandler(const char* uri) {
     if (StrEndsWith(uri, "index.shtml") || StrEndsWith(uri, "index.html"))
-        return std::string(INDEX_FILE_NAME);
+        return std::string(MAIN_WEB_PATH);
     
-    else if (StrEndsWith(uri, STREAM_PATH)) {
+    else if (StrEndsWith(uri, STREAM_WEB_PATH)) {
         // get status
         //if (xSemaphoreTake(status_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
         //    printf("Status: %d\n", status);
@@ -601,7 +641,7 @@ HttpServer::Content UriHandler(const char* uri) {
             int ymax = result.ymax * image_size;
 
             // TODO reuse IoU calculations?
-            if (isMasked(xmin, xmax, ymin, ymax, image_size, mask, mask_size))
+            if (isMasked(xmin, xmax, ymin, ymax, image_size, config.mask, config.mask_size))
                 drawRectangle(ymin, ymax, xmin, xmax, &img_copy, image_size, image_size, 0, 0, 255);
             else
                 drawRectangle(ymin, ymax, xmin, xmax, &img_copy, image_size, image_size, 0, 255, 0);
@@ -612,7 +652,12 @@ HttpServer::Content UriHandler(const char* uri) {
         JpegCompressRgb(img_copy.data(), image_size, image_size, 75, &jpeg);
         return jpeg;
     }
-    else if (StrEndsWith(uri, CONFIG_PATH)) {
+
+    else if (StrEndsWith(uri, CONFIG_WEB_PATH)) {
+        printf("Load not implemented yet");
+        return loadConfigFile();
+    }
+    else if (StrEndsWith(uri, CONFIG_RESET_WEB_PATH)) {
         printf("Load not implemented yet");
         return {};
     }
@@ -623,20 +668,20 @@ HttpServer::Content UriHandler(const char* uri) {
 std::string postUriHandler(std::string uri, std::vector<uint8_t> payload) {
     printf("on post finished\r\n");
 
-    if (StrEndsWith(uri, CONFIG_PATH)) {
+    if (StrEndsWith(uri, CONFIG_WEB_PATH)) {
         for (size_t i = 0; i < payload.size(); i++)
             printf("%c", payload[i]);
         printf("\n");
         if (payload.size() < 92) {
             printf("invalid config payload\n");
-            return std::string();
+            return {};
         }
         return "/index.html";
     }
 
     printf("unhandled uri: %s\n", uri.c_str());
 
-    return std::string();
+    return {};
 }
 
 
@@ -656,37 +701,6 @@ extern "C" void app_main(void* param) {
     } else {
         printf("We didn't get an IP via DHCP, not progressing further.\r\n");
         return;
-    }
-
-    //load/create all required files
-    //if (!LfsFileExists("/ok.txt")) {
-    //    if (LfsWriteFile("/ok.txt", "ok"))
-    //        printf("ok created\n");
-    //    else
-    //        printf("failed to create ok\n");
-    //}
-    if (!LfsFileExists("/cfg.json")) {
-        std::string cfg = "{";
-        cfg += "\"maskSize\":" + std::to_string(mask_size);  //num
-        cfg += "\"mask\":\"";
-        for (int i = 0; i < mask.size(); i++)
-            cfg += std::to_string(mask[i]);
-        cfg += "\"";
-        cfg += "\"rotation\":"  + std::to_string(rotation);   //num
-        cfg += "\"detThresh\":" + std::to_string(det_thresh); //num
-        cfg += "\"iouThresh\":" + std::to_string(iou_thresh); //num
-        cfg += "\"fpChange\":"  + std::to_string(fp_change);  //num
-        cfg += "\"fpCount\":"   + std::to_string(fp_count);   //num
-        cfg += "}";
-        if (LfsWriteFile("/cfg.json", cfg))
-            printf("cfg created\n");
-        else
-            printf("failed to create cfg\n");
-    }
-
-    std::string buf;
-    if (LfsReadFile("/cfg.json", &buf)) {
-        printf("Saved config:\n%s\n", buf.c_str());
     }
 
 
@@ -732,6 +746,30 @@ extern "C" void app_main(void* param) {
     CameraTask::GetSingleton()->Enable(CameraMode::kStreaming);
 
     setup();
+
+    if (!LfsFileExists(CONFIG_PATH)) {
+        std::string cfg = std::to_string(config.mask_size) + ',';
+        config.mask.resize(config.mask_size * config.mask_size, 0);
+        for (auto val: config.mask)
+            cfg += std::to_string(val);
+        cfg += ',';
+        cfg += std::to_string(config.rotation)   + ',';
+        cfg += std::to_string(config.det_thresh) + ',';
+        cfg += std::to_string(config.iou_thresh) + ',';
+        cfg += std::to_string(config.fp_change)  + ',';
+        cfg += std::to_string(config.fp_count)   + ',';
+        cfg += std::to_string(config.jpeg_quality);
+
+        if (saveConfigFile(cfg)) {
+            printf("failed to create config file\n");
+            vTaskDelete(NULL);
+        }
+        printf("Config created:\n%s\n", cfg.c_str());
+    }
+    else {
+        printf("Config loaded:\n%s\n", loadConfigFile().c_str());
+    }
+
 
     xTaskCreate(detectTask, "detect", 0x4000, nullptr, 3, &detect_task_handle);
     PostHttpServer http_server;
