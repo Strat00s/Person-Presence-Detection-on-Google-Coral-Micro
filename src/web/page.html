@@ -153,8 +153,9 @@
     </div>
 
     <div class="config-group">
-      <button id="saveToFileBtn" onclick="">Save configuration to file</button>
-      <button id="loadFromFileBtn" onclick="">Load configuration from file</button>
+      <button id="saveToFileBtn" onclick="downloadConfig()">Download configuration</button>
+      <input type="file" id="file-input" style="display: none;" onchange="uploadConfig()" />
+      <button id="loadFromFileBtn" onclick="document.getElementById('file-input').click()">Upload configuration</button>
     </div>
 
   </div>
@@ -247,6 +248,8 @@
     }
 
     function updateDocument(values) {
+      if (values.length != 7)
+        throw Error("Invalid csv length of ", values.length);
       maskSize = values[0];
       rotation = values[2];
       detThresh = values[3];
@@ -280,14 +283,25 @@
         .catch(error => console.error("Failed to load config: ", error));
     }
 
-    function saveConfig() {
+    function buildCsvString() {
       let maskVal = "";
       mask.val.forEach(row => {
         row.forEach(item => {
           maskVal += item.toString();
         })
       })
+      var csv = maskSize.toString() + ",";
+      csv += maskVal + ",";
+      csv += rotation.toString() + ",";
+      csv += detThresh.toString() + ",";
+      csv += iouThresh.toString() + ",";
+      csv += fpChange.toString() + ",";
+      csv += fpCount.toString() + ",";
+      csv += jpegQuality.toString();
+      return csv;
+    }
 
+    function saveConfig() {
       rotation = document.getElementById("image-rotation").value;
       maskSize = document.getElementById("grid-size").value;
       detThresh = document.getElementById("det-thresh").value;
@@ -296,16 +310,9 @@
       fpCount = document.getElementById("fp-count").value;
       jpegQuality = document.getElementById("jpeg-quality").value;
 
-      var data = maskSize.toString() + ",";
-      data += maskVal + ",";
-      data += rotation.toString() + ",";
-      data += detThresh.toString() + ",";
-      data += iouThresh.toString() + ",";
-      data += fpChange.toString() + ",";
-      data += fpCount.toString() + ",";
-      data += jpegQuality.toString();
-      postData(configSaveUrl, "text/plain", data)
-        .then(console.log("Config saved:", data))
+      var csv = buildCsvString();
+      postData(configSaveUrl, "text/plain", csv)
+        .then(console.log("Config saved:", csv))
         .catch(error => console.error("Failed to save config: ", error));
     }
 
@@ -316,6 +323,37 @@
           updateDocument(config.split(','));
         })
         .catch(error => console.error("Failed to reset load config: ", error));
+    }
+
+    function downloadConfig() {
+      var csv = buildCsvString();
+      var blob = new Blob([csv], { type: "text/plain" }); //Create a blob with the text
+      var a = document.createElement("a");                 //Create an anchor element and set the URL to the blob
+      a.href = URL.createObjectURL(blob);
+      a.download = "config.csv";                           //Define file name
+      document.body.appendChild(a);                        //Append the anchor to the document
+      a.click();                                           //Trigger the download by simulating a click
+      document.body.removeChild(a);                        //Clean up by removing the element
+    }
+
+    function uploadConfig() {
+      var fileInput = document.getElementById('file-input');
+      var file = fileInput.files[0]; // Get the file
+      var reader = new FileReader();
+
+      reader.onload = function (e) {
+        var csv = e.target.result;
+        console.log(csv);
+        updateDocument(csv.split(','));
+      };
+
+      reader.onerror = function (e) {
+        // Handle errors
+        console.error("File could not be loaded: " + e.target.error.code);
+      };
+
+      reader.readAsText(file); // Read the file as text
+
     }
 
     function toggleMask() {
@@ -406,7 +444,7 @@
         }
 
         // Adjust this value as needed for performance and update frequency
-        await sleep(20);
+        await sleep(200);
       }
     }
 

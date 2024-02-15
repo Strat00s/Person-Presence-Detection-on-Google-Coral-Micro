@@ -32,6 +32,7 @@ add_executable_m7(my_project
     main.cc
     DATA
     ${CMAKE_CURRENT_SOURCE_DIR}/web/page.html>/page.html
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/responses/200.html>/200.html
     ${PROJECT_SOURCE_DIR}/models/my_models/ssdlite_mobiledet_coco_qat_postprocess_edgetpu.tflite>/model.tflite
 )
 

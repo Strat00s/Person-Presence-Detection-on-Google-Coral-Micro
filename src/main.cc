@@ -1,14 +1,12 @@
-//TODO configurable grid size
-//TODO rotation
-//TODO save to file
-//TODO load from file
-
 //TODO move stuff to m4 core
 //TODO move stuff to own classes
 
-//TODO move useless data copying (if reference can be used)
+//TODO configurable grid size
+//TODO rotation
 
-//TODO fix is covered
+//TODO remove useless data copying (if reference can be used)
+
+//TODO fix isCovered
 
 //TODO has changed average -> better calculcations
 
