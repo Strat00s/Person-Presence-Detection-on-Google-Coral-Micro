@@ -1,8 +1,16 @@
+//TODO mark detected after 3 out of 5 consecutive frames
+
+//TODO final structure:
+//bbox
+//score
+//type of detection (false positive, masked, unmasked but not yet full, full)
+
 //TODO move stuff to m4 core
 //TODO move stuff to own classes
 
-//TODO configurable grid size
-//TODO rotation
+//TODO output to pin
+//TODO output on LED
+//TODO output to uri
 
 //TODO remove useless data copying (if reference can be used)
 
@@ -13,6 +21,10 @@
 //TODO detect brightness change
 //if big enough, update current last frame even if something is detected (update only parts with not detections)
 
+//TODO configurable grid size
+//TODO rotation
+//TODO status update to webpage
+
 //TODO UI???
 
 #include <cstdio>
@@ -20,6 +32,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numeric>
+#include <deque>
 
 #include "libs/base/http_server.h"
 #include "libs/base/led.h"
@@ -119,6 +132,10 @@ typedef struct {
     int score;
 } bbox_t;
 std::vector<bbox_t> results;
+
+
+int detect_cnt = 0;
+std::deque<bool> detected_buf(5, false);
 
 
 /*----(CONFIG HANDLING)----*/
@@ -627,6 +644,9 @@ HttpServer::Content UriHandler(const char* uri) {
         else
             printf("failed to acquire config mutex\n");
 
+        //TODO move this to detector task
+        bool is_unmasked = false;
+        std::vector<bbox_t> final_result;
         for (auto result : res_copy) {
             int xmin = result.xmin;
             int xmax = result.xmax;
@@ -634,14 +654,32 @@ HttpServer::Content UriHandler(const char* uri) {
             int ymax = result.ymax;
 
             int ticks = xTaskGetTickCount();
-            if (isMasked(xmin, xmax, ymin, ymax, image_size, mask, mask_size))
-                drawRectangleFast(xmin, ymin, xmax, ymax, &img_copy, image_size, 0, 0, 255);
-                //drawRectangle(ymin, ymax, xmin, xmax, &img_copy, image_size, image_size, 0, 0, 255);
-                
+            if (!isMasked(xmin, xmax, ymin, ymax, image_size, mask, mask_size)) {
+                is_unmasked = true;
+                final_result.push_back(result);
+            }
             else
+                drawRectangleFast(xmin, ymin, xmax, ymax, &img_copy, image_size, 0, 0, 255);
+        }
+        detected_buf.pop_front();
+        detected_buf.push_back(is_unmasked);
+
+        int detect_cnt = 0;
+        for (auto was_detected : detected_buf)
+            detect_cnt += was_detected ? 1 : 0;
+
+        printf("%d %d\n", detect_cnt, detected_buf.size());
+
+        for (auto result : final_result) {
+            int xmin = result.xmin;
+            int xmax = result.xmax;
+            int ymin = result.ymin;
+            int ymax = result.ymax;
+
+            if (detect_cnt >= 3)
                 drawRectangleFast(xmin, ymin, xmax, ymax, &img_copy, image_size, 0, 255, 0);
-                //drawRectangle(ymin, ymax, xmin, xmax, &img_copy, image_size, image_size, 0, 255, 0);
-            printf("Drawing time: %d\n", xTaskGetTickCount() - ticks);
+            else
+                drawRectangleFast(xmin, ymin, xmax, ymax, &img_copy, image_size, 255, 255, 0);
         }
 
         imageVector_t jpeg;
