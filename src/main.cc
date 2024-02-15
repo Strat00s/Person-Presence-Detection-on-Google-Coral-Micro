@@ -1,6 +1,3 @@
-//TODO bbox_t int
-//TODO optimize rectangle drawing
-
 //TODO configurable grid size
 //TODO rotation
 //TODO save to file
@@ -8,6 +5,8 @@
 
 //TODO move stuff to m4 core
 //TODO move stuff to own classes
+
+//TODO move useless data copying (if reference can be used)
 
 //TODO fix is covered
 
@@ -77,6 +76,9 @@ using namespace std;
 STATIC_TENSOR_ARENA_IN_SDRAM(tensor_arena, TENSOR_ARENA_SIZE);
 
 
+typedef std::vector<uint8_t> imageVector_t;
+
+
 int image_size   = DEFAULT_IMAGE_SIZE;
 typedef struct cfg_struct{
     int mask_size    = DEFAULT_MASK_SIZE;
@@ -96,7 +98,7 @@ tflite::MicroMutableOpResolver<3> resolver;
 tflite::MicroInterpreter *interpreter; //must be created and configured in the main task for some reason
 tflite::MicroErrorReporter error_reporter;
 
-std::vector<uint8_t> image;
+imageVector_t image;
 CameraFrameFormat frame;
 
 SemaphoreHandle_t status_mux;
@@ -107,7 +109,7 @@ int status;
 
 TaskHandle_t detect_task_handle; // detector task handle
 
-std::vector<uint8_t> last_frame; // last empty frame before any detection happens
+imageVector_t last_frame; // last empty frame before any detection happens
 int detected = 0;
 
 
@@ -264,38 +266,40 @@ int loadConfigFile(std::string *str) {
 
 
 /*----(IMAGE DRAWING)----*/
-void drawHorizontalLine(int y, int x_min, int x_max, std::vector<uint8_t> *image, int width, int height, uint8_t r, uint8_t g, uint8_t b) {
-    int start = width * y + x_min;
-    for (int i = start; i < start + (x_max - x_min); i++) {
-        (*image)[i * 3]     = r;
-        (*image)[i * 3 + 1] = g;
-        (*image)[i * 3 + 2] = b;
-    }
-}
+void drawRectangleFast(int xmin, int ymin, int xmax, int ymax, imageVector_t *image, int image_size, uint8_t r, uint8_t g, uint8_t b) {
+    if (xmin < 0)
+        xmin = 0;
+    if (ymin < 0)
+        ymin = 0;
+    if (xmax > image_size)
+        xmax = image_size;
+    if (ymax > image_size)
+        ymax = image_size;
 
-void drawVerticalLine(int x, int y_min, int y_max, std::vector<uint8_t> *image, int width, int height, uint8_t r, uint8_t g, uint8_t b) {
-    int start_x = y_min * width + x;
-    for (int i = start_x; i < start_x + width * (y_max - y_min); i += width) {
-        (*image)[i * 3]     = r;
-        (*image)[i * 3 + 1] = g;
-        (*image)[i * 3 + 2] = b;
+    //draw top and bottom sides
+    int max_start = (ymax * image_size + xmin) * 3;
+    int min_start = (ymin * image_size + xmin) * 3;
+    int step = 3;
+    for (int i = 0; i < (xmax - xmin) * step; i += step) {
+        (*image)[min_start + i]     = r;
+        (*image)[min_start + i + 1] = g;
+        (*image)[min_start + i + 2] = b;
+        (*image)[max_start + i]     = r;
+        (*image)[max_start + i + 1] = g;
+        (*image)[max_start + i + 2] = b;
     }
-}
 
-//TODO make more efficient version
-void drawRectangle(int y_min, int y_max, int x_min, int x_max, std::vector<uint8_t> *image, int width, int height, uint8_t r = 0, uint8_t g = 255, uint8_t b = 0) {
-    if (y_min > height)
-        y_min = height;
-    if (y_max < 0)
-        y_max = 0;
-    if (x_min < 0)
-        x_min = 0;
-    if (x_max > width)
-        x_max = width;
-    drawHorizontalLine(y_min, x_min, x_max, image, width, height, r, g, b);
-    drawHorizontalLine(y_max, x_min, x_max, image, width, height, r, g, b);
-    drawVerticalLine(x_min, y_min, y_max, image, width, height, r, g, b);
-    drawVerticalLine(x_max, y_min, y_max, image, width, height, r, g, b);
+    //draw left and right sides
+    max_start = (ymin * image_size + xmax) * 3;
+    step = image_size * 3;
+    for (int i = 0; i < (ymax - ymin) * step; i += step) {
+        (*image)[max_start + i]     = r;
+        (*image)[max_start + i + 1] = g;
+        (*image)[max_start + i + 2] = b;
+        (*image)[min_start + i]     = r;
+        (*image)[min_start + i + 1] = g;
+        (*image)[min_start + i + 2] = b;
+    }
 }
 
 
@@ -305,7 +309,7 @@ inline bool isInsideBox(int x, int y, int x_min, int x_max, int y_min, int y_max
     return (x >= x_min && x <= x_max && y >= y_min && y <= y_max);
 }
 
-bool isMasked(int x_min, int x_max, int y_min, int y_max, int image_size, const std::vector<uint8_t>& mask, int mask_size) {
+bool isMasked(int x_min, int x_max, int y_min, int y_max, int image_size, const imageVector_t& mask, int mask_size) {
     // Scale factor from the image size to grid size.
     const int scale = image_size / mask_size;
 
@@ -331,7 +335,7 @@ bool isMasked(int x_min, int x_max, int y_min, int y_max, int image_size, const 
         }
     }
 
-    printf("%d %d %d %d\n", coveredCells, totalCells, mask_size, mask.size());
+    //printf("%d %d %d %d\n", coveredCells, totalCells, mask_size, mask.size());
 
     // Check if at least half of the box is covered by non-toggled cells.
     return coveredCells > totalCells / 2;
@@ -349,7 +353,7 @@ void setStatus(int s) {
 }
 
 // Function to check if the specified region has changed significantly - average color approach
-bool hasChangedAverage(const std::vector<unsigned char>& currentImage, const std::vector<unsigned char>& previousImage, int image_size, int xmin, int ymin, int xmax, int ymax, float change, float count) {
+bool hasChangedAverage(const imageVector_t &currentImage, const imageVector_t &previousImage, int image_size, int xmin, int ymin, int xmax, int ymax, float change, float count) {
     int32_t changed = 0;
     int32_t pixel_cnt = (xmax - xmin + 1) * (ymax - ymin + 1);
     for (int y = ymin; y <= ymax; ++y) {
@@ -383,7 +387,7 @@ float IoU(const bbox_t& a, const bbox_t& b) {
 }
 
 //std::vector<tensorflow::Object> getResults(tflite::MicroInterpreter *interpreter, float threshold, float iou_threshold) {
-std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, std::vector<uint8_t> image, std::vector<uint8_t> last_image,
+std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, const imageVector_t &image, const imageVector_t &last_image,
                                int image_size, float threshold, float iou_threshold, float fp_change, float fp_count) {
     float *bboxes, *ids, *scores, *count;
     if (interpreter->output_tensor(2)->dims->size == 1) {
@@ -595,7 +599,7 @@ HttpServer::Content UriHandler(const char* uri) {
         return std::string(MAIN_WEB_PATH);
     
     else if (StrEndsWith(uri, STREAM_WEB_PATH)) {
-        std::vector<uint8_t> img_copy;
+        imageVector_t img_copy;
         if (xSemaphoreTake(image_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
             img_copy = image;
             xSemaphoreGive(image_mux);
@@ -631,13 +635,18 @@ HttpServer::Content UriHandler(const char* uri) {
             int ymin = result.ymin;
             int ymax = result.ymax;
 
+            int ticks = xTaskGetTickCount();
             if (isMasked(xmin, xmax, ymin, ymax, image_size, mask, mask_size))
-                drawRectangle(ymin, ymax, xmin, xmax, &img_copy, image_size, image_size, 0, 0, 255);
+                drawRectangleFast(xmin, ymin, xmax, ymax, &img_copy, image_size, 0, 0, 255);
+                //drawRectangle(ymin, ymax, xmin, xmax, &img_copy, image_size, image_size, 0, 0, 255);
+                
             else
-                drawRectangle(ymin, ymax, xmin, xmax, &img_copy, image_size, image_size, 0, 255, 0);
+                drawRectangleFast(xmin, ymin, xmax, ymax, &img_copy, image_size, 0, 255, 0);
+                //drawRectangle(ymin, ymax, xmin, xmax, &img_copy, image_size, image_size, 0, 255, 0);
+            printf("Drawing time: %d\n", xTaskGetTickCount() - ticks);
         }
 
-        std::vector<uint8_t> jpeg;
+        imageVector_t jpeg;
         JpegCompressRgb(img_copy.data(), image_size, image_size, quality, &jpeg);
         return jpeg;
     }
