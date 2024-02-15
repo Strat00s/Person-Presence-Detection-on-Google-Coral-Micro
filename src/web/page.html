@@ -62,14 +62,14 @@
     #gridCanvas {
       display: 'none';
       position: absolute;
-      width: 320px;
-      height: 320px;
+      width: 500px;
+      height: 500px;
     }
 
     .cell {
-      width: 10px;
+      width: 15.6px;
       /* 320px / 32 cells */
-      height: 10px;
+      height: 15.6px;
       float: left;
       border: 1px solid #dddddd57;
       box-sizing: border-box;
@@ -88,7 +88,7 @@
 <body id="body" onload="start()">
 
   <div id="video-container">
-    <img id="stream" src="https://picsum.photos/320/320" alt="Image cannot be displayed" />
+    <img id="stream" alt="Image cannot be displayed" />
     <div id="gridCanvas"></div>
   </div>
 
@@ -105,8 +105,10 @@
     </div>
 
     <div class="config-group">
-      <label for="jpeg-size">Preview quality:</label>
-      <input type="number" id="jpeg-size" name="jpeg-size" size="3" maxlength="3" min="5" max="100">
+      <label for="jpeg-quality">Preview quality:</label>
+      <input type="number" id="jpeg-quality" name="jpeg-quality" size="3" maxlength="3" min="5" max="100">
+      <label for="preview-size">Preview size:</label>
+      <input type="number" id="preview-size" name="preview-size" size="4" maxlength="4" min="200" max="1000">
     </div>
 
     <div class="config-group">
@@ -165,7 +167,7 @@
     const configResetUrl = "/config_reset";
     const statusUrl = "/status";
 
-    var imageSize = 320;
+    var previewSize = 500;
     var maskSize = 32; //current mask size (cell count per dimension)
     var rotation = 270;
     var detThresh = 50;
@@ -195,7 +197,8 @@
       document.getElementById("iou-thresh").value = iouThresh;
       document.getElementById("fp-change").value = fpChange;
       document.getElementById("fp-count").value = fpCount;
-      document.getElementById("jpeg-size").value = jpegQuality;
+      document.getElementById("jpeg-quality").value = jpegQuality;
+      document.getElementById("preview-size").value = previewSize;
       loadConfig();
       createGrid();
       updatePreview();
@@ -243,34 +246,36 @@
         });
     }
 
+    function updateDocument(values) {
+      maskSize = values[0];
+      rotation = values[2];
+      detThresh = values[3];
+      iouThresh = values[4];
+      fpChange = values[5];
+      fpCount = values[6];
+      jpegQuality = values[7];
+      for (var i = 0; i < maskSize; i++) {
+        for (var ii = 0; ii < maskSize; ii++) {
+          mask.val[i][ii] = Number(values[1][i * maskSize + ii]);
+          toggleDir = mask.val[i][ii];
+          toggleCell(i, ii);
+        }
+      }
+
+      document.getElementById("image-rotation").value = rotation;
+      document.getElementById("grid-size").value = maskSize;
+      document.getElementById("det-thresh").value = detThresh;
+      document.getElementById("iou-thresh").value = iouThresh;
+      document.getElementById("fp-change").value = fpChange;
+      document.getElementById("fp-count").value = fpCount;
+      document.getElementById("jpeg-quality").value = jpegQuality;
+    }
+
     function loadConfig() {
       getData(configLoadUrl, false)
         .then(config => {
           console.log("Config loaded");
-          const values = config.split(',');
-          console.log(values);
-          maskSize = values[0];
-          rotation = values[2];
-          detThresh = values[3];
-          iouThresh = values[4];
-          fpChange = values[5];
-          fpCount = values[6];
-          jpegQuality = values[7];
-          for (var i = 0; i < maskSize; i++) {
-            for (var ii = 0; ii < maskSize; ii++) {
-              mask.val[i][ii] = Number(values[1][i * maskSize + ii]);
-              toggleDir = mask.val[i][ii];
-              toggleCell(i, ii);
-            }
-          }
-
-          document.getElementById("image-rotation").value = rotation;
-          document.getElementById("grid-size").value = maskSize;
-          document.getElementById("det-thresh").value = detThresh;
-          document.getElementById("iou-thresh").value = iouThresh;
-          document.getElementById("fp-change").value = fpChange;
-          document.getElementById("fp-count").value = fpCount;
-          document.getElementById("jpeg-size").value = jpegQuality;
+          updateDocument(config.split(','));
         })
         .catch(error => console.error("Failed to load config: ", error));
     }
@@ -289,7 +294,7 @@
       iouThresh = document.getElementById("iou-thresh").value;
       fpChange = document.getElementById("fp-change").value;
       fpCount = document.getElementById("fp-count").value;
-      jpegQuality = document.getElementById("jpeg-size").value;
+      jpegQuality = document.getElementById("jpeg-quality").value;
 
       var data = maskSize.toString() + ",";
       data += maskVal + ",";
@@ -308,16 +313,9 @@
       getData(configResetUrl, false)
         .then(config => {
           console.log("Config reset loaded");
-          console.log("CSV parser not done yet");
-          //maskSize = config["maskSize"];
-          //mask = config["mask"];
-          //rotation = config["rotation"];
-          //detThresh = config["detThresh"];
-          //iouThresh = config["iouThresh"];
-          //fpChange = config["fpChange"];
-          //fpCount = config["fpCount"];
+          updateDocument(config.split(','));
         })
-        .catch(error => console.error("Failed to load config: ", error));
+        .catch(error => console.error("Failed to reset load config: ", error));
     }
 
     function toggleMask() {
@@ -399,8 +397,8 @@
             URL.revokeObjectURL(imgElt.src);
 
           imgElt.src = URL.createObjectURL(imageBlob);
-          imgElt.width = imageSize;//document.getElementById("image-width").value;
-          imgElt.height = imageSize;//document.getElementById("image-height").value;
+          imgElt.width = previewSize;//document.getElementById("image-width").value;
+          imgElt.height = previewSize;//document.getElementById("image-height").value;
           //let rotation  = document.getElementById("image-rotation").value;
           //imgElt.style.transform = 'rotate(' + rotation.toString() + 'deg)';
         } catch (reason) {

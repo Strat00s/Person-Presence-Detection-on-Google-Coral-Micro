@@ -1,9 +1,10 @@
-//TODO separate load and save for config
+//TODO reset config
 //TODO configurable grid size
 //TODO rotation
 //TODO save to file
 //TODO load from file
-//TODO reset config
+//TODO bbox_t int
+//TODO optimize rectangle drawing
 
 //TODO move stuff to m4 core
 //TODO move stuff to own classes
@@ -53,28 +54,39 @@ using namespace std;
 #define MODEL_PATH            "/model.tflite"
 #define CONFIG_PATH           "/cfg.csv"
 
+#define DEFAULT_IMAGE_SIZE   320
+#define DEFAULT_MASK_SIZE    32
+#define DEFAULT_ROTATION     270
+#define DEFAULT_DET_THRESH   50
+#define DEFAULT_IOU_THRESH   50
+#define DEFAULT_FP_CHANGE    40
+#define DEFAULT_FP_COUNT     5
+#define DEFAULT_JPEG_QUALITY 75
+
+
 #define IDX(x, y, width) (y * width + x) * 3;
 
 #define TENSOR_ARENA_SIZE     8 * 1024 * 1024
 STATIC_TENSOR_ARENA_IN_SDRAM(tensor_arena, TENSOR_ARENA_SIZE);
 
 
-int image_size   = 320;
-typedef struct {
-    int mask_size = 32;
+int image_size   = DEFAULT_IMAGE_SIZE;
+typedef struct cfg_struct{
+    int mask_size    = DEFAULT_MASK_SIZE;
     std::vector<uint8_t> mask;
-    int rotation = 270;
-    int det_thresh = 50;
-    int iou_thresh = 50;
-    int fp_change = 40;
-    int fp_count = 5;
-    int jpeg_quality = 75;
-} cfg_t;
-cfg_t config;
+    int rotation     = DEFAULT_ROTATION;
+    int det_thresh   = DEFAULT_DET_THRESH;
+    int iou_thresh   = DEFAULT_IOU_THRESH;
+    int fp_change    = DEFAULT_FP_CHANGE;
+    int fp_count     = DEFAULT_FP_COUNT;
+    int jpeg_quality = DEFAULT_JPEG_QUALITY;
+    cfg_struct() {mask.resize(mask_size * mask_size, 0);}
+} cfg_struct_t;
+cfg_struct_t config;
 
 
 tflite::MicroMutableOpResolver<3> resolver;
-tflite::MicroInterpreter *interpreter;
+tflite::MicroInterpreter *interpreter; //must be created and configured in the main task for some reason
 tflite::MicroErrorReporter error_reporter;
 
 std::vector<uint8_t> image;
@@ -102,12 +114,13 @@ typedef struct {
 std::vector<bbox_t> results;
 
 
+/*----(CONFIG HANDLING)----*/
 /** @brief build config csv from current config 
  * 
  * @param config 
  * @return std::string 
  */
-std::string buildConfigCsv(cfg_t config) {
+std::string buildConfigCsv(cfg_struct_t config) {
     std::string cfg = std::to_string(config.mask_size) + ',';
     for (auto val: config.mask)
         cfg += std::to_string(val);
@@ -118,9 +131,6 @@ std::string buildConfigCsv(cfg_t config) {
     cfg += std::to_string(config.fp_change)  + ',';
     cfg += std::to_string(config.fp_count)   + ',';
     cfg += std::to_string(config.jpeg_quality);
-
-    printf("Newly built config: %s\n", cfg.c_str());
-
     return cfg;
 }
 
@@ -140,8 +150,12 @@ int saveConfig(std::string config_csv) {
     int field_num = -1;
     size_t start = 0;
     size_t end = config_csv.find(',');
-    cfg_t new_config;
-    new_config.mask.resize(new_config.mask_size * new_config.mask_size, 0);
+    cfg_struct_t new_config;
+
+    if (!new_config.mask.size()) {
+        printf("UH OH\n");
+        vTaskDelay(100000);
+    }
 
     while (!finished) {
         field_num++;
@@ -215,10 +229,10 @@ int saveConfig(std::string config_csv) {
 int saveConfigFile(std::string config_csv) {
     //write the csv string to file
     if (!LfsWriteFile(CONFIG_PATH, config_csv))
-        return 1;
+        return 3;
 
     //save it to config variable
-    return saveConfig(config_csv) ? 2 : 0;
+    return saveConfig(config_csv);
 }
 
 /** @brief Load config csv from a file or generate it if file does not exist and update global variables
@@ -242,6 +256,7 @@ int loadConfigFile(std::string *str) {
 }
 
 
+/*----(IMAGE DRAWING)----*/
 void drawHorizontalLine(int y, int x_min, int x_max, std::vector<uint8_t> *image, int width, int height, uint8_t r, uint8_t g, uint8_t b) {
     int start = width * y + x_min;
     for (int i = start; i < start + (x_max - x_min); i++) {
@@ -277,6 +292,7 @@ void drawRectangle(int y_min, int y_max, int x_min, int x_max, std::vector<uint8
 }
 
 
+/*----(MASK HANDLING)----*/
 // Helper function to check if the coordinates are inside the box.
 inline bool isInsideBox(int x, int y, int x_min, int x_max, int y_min, int y_max) {
     return (x >= x_min && x <= x_max && y >= y_min && y <= y_max);
@@ -571,20 +587,12 @@ void setup() {
     };
 }
 
+/*----(WEB HADNLING)----*/
 HttpServer::Content UriHandler(const char* uri) {
     if (StrEndsWith(uri, "index.shtml") || StrEndsWith(uri, "index.html"))
         return std::string(MAIN_WEB_PATH);
     
     else if (StrEndsWith(uri, STREAM_WEB_PATH)) {
-        // get status
-        //if (xSemaphoreTake(status_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
-        //    printf("Status: %d\n", status);
-        //    xSemaphoreGive(status_mux);
-        //}
-        //else
-        //    printf("failed to acquire det mutex\n");
-
-        // get image copy
         std::vector<uint8_t> img_copy;
         if (xSemaphoreTake(image_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
             img_copy = image;
@@ -637,17 +645,23 @@ HttpServer::Content UriHandler(const char* uri) {
     }
 
     else if (StrEndsWith(uri, CONFIG_LOAD_WEB_PATH)) {
-        std::string str;
-        int ret = loadConfigFile(&str);
+        std::string cfg_csv;
+        int ret = loadConfigFile(&cfg_csv);
         if (ret) {
             printf("Load failed\n");
             return {};
         }
-        return std::vector<uint8_t>(str.begin(), str.end());
+        return std::vector<uint8_t>(cfg_csv.begin(), cfg_csv.end());
     }
     else if (StrEndsWith(uri, CONFIG_RESET_WEB_PATH)) {
-        printf("Load not implemented yet");
-        return {};
+        cfg_struct_t default_config;
+        std::string cfg_csv = buildConfigCsv(default_config);
+        int ret = saveConfigFile(cfg_csv);
+        if (ret) {
+            printf("Failed to save default config\n");
+            return {};
+        }
+        return std::vector<uint8_t>(cfg_csv.begin(), cfg_csv.end());
     }
 
     return {};
@@ -663,13 +677,13 @@ std::string postUriHandler(std::string uri, std::vector<uint8_t> payload) {
             return {};
         }
 
-        return "/index.html";
+        return "/200.html";
     }
 
     printf("unhandled uri: %s\n", uri.c_str());
-
     return {};
 }
+
 
 
 extern "C" void app_main(void* param) {
