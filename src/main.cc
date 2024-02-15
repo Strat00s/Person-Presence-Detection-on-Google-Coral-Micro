@@ -1,13 +1,20 @@
-//TODO reset config
+//TODO bbox_t int
+//TODO optimize rectangle drawing
+
 //TODO configurable grid size
 //TODO rotation
 //TODO save to file
 //TODO load from file
-//TODO bbox_t int
-//TODO optimize rectangle drawing
 
 //TODO move stuff to m4 core
 //TODO move stuff to own classes
+
+//TODO fix is covered
+
+//TODO has changed average -> better calculcations
+
+//TODO detect brightness change
+//if big enough, update current last frame even if something is detected (update only parts with not detections)
 
 //TODO UI???
 
@@ -105,11 +112,11 @@ int detected = 0;
 
 
 typedef struct {
-    float ymin;
-    float xmin;
-    float ymax;
-    float xmax;
-    float score;
+    int ymin;
+    int xmin;
+    int ymax;
+    int xmax;
+    int score;
 } bbox_t;
 std::vector<bbox_t> results;
 
@@ -324,6 +331,8 @@ bool isMasked(int x_min, int x_max, int y_min, int y_max, int image_size, const 
         }
     }
 
+    printf("%d %d %d %d\n", coveredCells, totalCells, mask_size, mask.size());
+
     // Check if at least half of the box is covered by non-toggled cells.
     return coveredCells > totalCells / 2;
 }
@@ -340,12 +349,12 @@ void setStatus(int s) {
 }
 
 // Function to check if the specified region has changed significantly - average color approach
-bool hasChangedAverage(const std::vector<unsigned char>& currentImage, const std::vector<unsigned char>& previousImage, int width, int height, int xmin, int ymin, int xmax, int ymax, float change, float count) {
+bool hasChangedAverage(const std::vector<unsigned char>& currentImage, const std::vector<unsigned char>& previousImage, int image_size, int xmin, int ymin, int xmax, int ymax, float change, float count) {
     int32_t changed = 0;
     int32_t pixel_cnt = (xmax - xmin + 1) * (ymax - ymin + 1);
     for (int y = ymin; y <= ymax; ++y) {
         for (int x = xmin; x <= xmax; ++x) {
-            size_t index = IDX(x, y, width);
+            size_t index = (y * image_size + x) * 3;
             int pixel_change = std::abs(currentImage[index] - previousImage[index]) +
                                std::abs(currentImage[index + 1] - previousImage[index + 1]) +
                                std::abs(currentImage[index + 2] - previousImage[index + 2]);
@@ -359,18 +368,23 @@ bool hasChangedAverage(const std::vector<unsigned char>& currentImage, const std
     return changed > (int32_t)std::round(pixel_cnt * count);
 }
 
-
-//float IoU(const tensorflow::BBox<float>& a, const tensorflow::BBox<float>& b) {
+/** @brief Intersection over union calculations for overlaping bounding boxes
+ * 
+ * @param a First bounding box
+ * @param b Second boundig box
+ * @return overlap ratio
+ */
 float IoU(const bbox_t& a, const bbox_t& b) {
-    float intersectionArea = std::max(0.0f, std::min(a.xmax, b.xmax) - std::max(a.xmin, b.xmin)) *
-                             std::max(0.0f, std::min(a.ymax, b.ymax) - std::max(a.ymin, b.ymin));
+    float intersectionArea = std::max(0, std::min(a.xmax, b.xmax) - std::max(a.xmin, b.xmin)) *
+                             std::max(0, std::min(a.ymax, b.ymax) - std::max(a.ymin, b.ymin));
     float unionArea = (a.xmax - a.xmin) * (a.ymax - a.ymin) +
                       (b.xmax - b.xmin) * (b.ymax - b.ymin) - intersectionArea;
     return intersectionArea / unionArea;
 }
 
 //std::vector<tensorflow::Object> getResults(tflite::MicroInterpreter *interpreter, float threshold, float iou_threshold) {
-std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, float threshold, float iou_threshold, float fp_change, float fp_count) {
+std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, std::vector<uint8_t> image, std::vector<uint8_t> last_image,
+                               int image_size, float threshold, float iou_threshold, float fp_change, float fp_count) {
     float *bboxes, *ids, *scores, *count;
     if (interpreter->output_tensor(2)->dims->size == 1) {
         scores = tflite::GetTensorData<float>(interpreter->output_tensor(0));
@@ -399,11 +413,11 @@ std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, float thre
         detected++;
 
         bbox_t bbox = {
-            .ymin  = std::max(0.0f, bboxes[4 * i]),
-            .xmin  = std::max(0.0f, bboxes[4 * i + 1]),
-            .ymax  = std::max(0.0f, bboxes[4 * i + 2]),
-            .xmax  = std::max(0.0f, bboxes[4 * i + 3]),
-            .score = scores[i]
+            .ymin  = std::max(0, static_cast<int>(bboxes[4 * i]     * image_size + 0.5f)),
+            .xmin  = std::max(0, static_cast<int>(bboxes[4 * i + 1] * image_size + 0.5f)),
+            .ymax  = std::max(0, static_cast<int>(bboxes[4 * i + 2] * image_size + 0.5f)),
+            .xmax  = std::max(0, static_cast<int>(bboxes[4 * i + 3] * image_size + 0.5f)),
+            .score = scores[i] * 100 + 0.5f
         };
         tmp_results.push_back(bbox);
     }
@@ -428,7 +442,7 @@ std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, float thre
         // probably not required as the model has it inside
         // go through remaining box and check if there are any that overlap with the current box and have lower score
         for (auto it = indices.begin(); it != indices.end(); ) {
-            //if (IoU(current_box.bbox, tmp_results[*it].bbox) > iou_threshold)
+            //remove index to box that is overlapped or move to next one if not overlapped
             if (IoU(current_box, tmp_results[*it]) > iou_threshold)
                 it = indices.erase(it);
             else
@@ -436,18 +450,10 @@ std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, float thre
         }
 
         // ignore boxes with not enough change
-        if (xSemaphoreTake(image_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
-            if (hasChangedAverage(image, last_frame, image_size, image_size, current_box.xmin * image_size, current_box.ymin * image_size, current_box.xmax * image_size, current_box.ymax * image_size, fp_change, fp_count))
-                results.push_back(current_box);
-            else
-                printf("Probably false positive\n");
-                xSemaphoreGive(image_mux);
-            }
-        else {
-            printf("failed to acquire img mutex\n");
-            setStatus(-80);
-            continue;
-        }
+        if (hasChangedAverage(image, last_image, image_size, current_box.xmin, current_box.ymin, current_box.xmax, current_box.ymax, fp_change, fp_count))
+            results.push_back(current_box);
+        else
+            printf("Probably false positive\n");
     }
 
     //printf("Total results vs final: %d vs %d\n", tmp_results.size(), results.size());
@@ -459,14 +465,17 @@ std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, float thre
 static void detectTask(void *args) {
     status = 0;
     int clean = 0;
-    int obj_cnt, det_thresh, iou_thresh, fp_change, fp_count, ret;
+    int obj_cnt, ret;
+    float det_thresh, iou_thresh, fp_change, fp_count;
     last_frame.resize(image.size(), 0);
+    auto detect_image = last_frame;
 
     //TODO initial "calibration"
     while (true) {
         // get frame
         if (xSemaphoreTake(image_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
             ret = CameraTask::GetSingleton()->GetFrame({frame});
+            detect_image = image;
             xSemaphoreGive(image_mux);
         }
         else {
@@ -481,14 +490,7 @@ static void detectTask(void *args) {
         }
 
         //copy image data to tensor
-        if (xSemaphoreTake(image_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
-            std::memcpy(tflite::GetTensorData<int8_t>(interpreter->input_tensor(0)), image.data(), image.size());
-            xSemaphoreGive(image_mux);
-        }
-        else {
-            printf("failed to acquire img mutex\n");
-            continue;
-        }
+        std::memcpy(tflite::GetTensorData<int8_t>(interpreter->input_tensor(0)), detect_image.data(), detect_image.size());
 
         // run model
         if (interpreter->Invoke() != kTfLiteOk) {
@@ -506,10 +508,10 @@ static void detectTask(void *args) {
 
         // get results and remove anything that is not a person
         if (xSemaphoreTake(config_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
-            det_thresh = config.det_thresh;
-            iou_thresh = config.iou_thresh;
-            fp_change = config.fp_change;
-            fp_count = config.fp_count;
+            det_thresh = config.det_thresh / 100.0f;
+            iou_thresh = config.iou_thresh / 100.0f;
+            fp_change = config.fp_change   / 100.0f;
+            fp_count = config.fp_count     / 100.0f;
             xSemaphoreGive(config_mux);
         }
         else {
@@ -520,7 +522,7 @@ static void detectTask(void *args) {
 
         obj_cnt = 0;
         if (xSemaphoreTake(result_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
-            results = getResults(interpreter, det_thresh / 100.0f, iou_thresh / 100.0f, fp_change / 100.0f, fp_count / 100.0f);
+            results = getResults(interpreter, detect_image, last_frame, image_size, det_thresh, iou_thresh, fp_change, fp_count);
             obj_cnt = results.size();
             xSemaphoreGive(result_mux);
             printf("%d objects\n", obj_cnt);
@@ -611,8 +613,8 @@ HttpServer::Content UriHandler(const char* uri) {
         else
             printf("failed to get res mutex\n");
 
-        int quality = 75;
-        int mask_size = 32; //TODO macro for contants
+        int quality = DEFAULT_JPEG_QUALITY;
+        int mask_size = DEFAULT_MASK_SIZE;
         std::vector<uint8_t> mask;
         if (xSemaphoreTake(config_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
             quality   = config.jpeg_quality;
@@ -624,14 +626,10 @@ HttpServer::Content UriHandler(const char* uri) {
             printf("failed to acquire config mutex\n");
 
         for (auto result : res_copy) {
-            //printf("%f %f %f %f\n", result.bbox.xmin, result.bbox.xmax, result.bbox.ymin, result.bbox.ymax);
-            int xmin = result.xmin * image_size;
-            int xmax = result.xmax * image_size;
-            int ymin = result.ymin * image_size;
-            int ymax = result.ymax * image_size;
-
-            
-
+            int xmin = result.xmin;
+            int xmax = result.xmax;
+            int ymin = result.ymin;
+            int ymax = result.ymax;
 
             if (isMasked(xmin, xmax, ymin, ymax, image_size, mask, mask_size))
                 drawRectangle(ymin, ymax, xmin, xmax, &img_copy, image_size, image_size, 0, 0, 255);
