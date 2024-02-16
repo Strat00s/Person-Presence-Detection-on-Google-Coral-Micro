@@ -36,4 +36,5 @@ add_executable_m4(my_project_m4
 
 target_link_libraries(my_project_m4
     libs_base-m4_freertos
+    libs_jpeg_m4
 )

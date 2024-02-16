@@ -21,19 +21,21 @@
 //M4 -> M7
 //M4 -> M4
 
+//Send image size M7 -> M4
+//configure M4
+//Send ACK M4 -> M7
+
 
 enum class IpcMsgType : uint8_t {
-    BBOX,   //M7 -> M4
-    IMAGE,  //M4 -> M7, M4 -> M4
-    CONFIG, //M4 -> M7
-    ACK,    //either but M4 does not care
-    IMAGE_SIZE //M7 -> M4 right after start
+    CONFIG,       //M7 -> M4
+    ACK,
 };
 
 enum IpcMsgGate {
     PRINT,
-    IMAGE,
-    CONFIG,
+    IMAGE_BEFORE,
+    IMAGE_AFTER,
+    JPEG,
     BBOX,
     OTHER
 };
@@ -42,8 +44,10 @@ enum IpcMsgGate {
 //I am too lazy to do it properly so this will have to do for now
 struct IpcMessageStruct {
     IpcMsgType type; //data type
+    image_vector_t *image_b;
+    image_vector_t *image_a;
+    image_vector_t *jpeg;
     bbox_vector_t *bboxes;
-    image_vector_t *image;
     int image_size;
     uint8_t gate; //gate for thredsafe access to data
 } __attribute__((packed));

@@ -127,31 +127,35 @@ std::vector<bbox_t> results;
 int detect_cnt = 0;
 std::deque<bool> detected_buf(5, false);
 
+//pointers to the underlying structures made in M4 for access
+image_vector_t image_before;
+image_vector_t image_after;
+image_vector_t jpeg;
+bbox_vector_t bboxes;
 
 /*----(IPC)----*/
 void printfM7(const char* format, ...) {
     va_list args;
     va_start(args, format);
-
-    // Call vprintf with the new format string and the original variadic arguments
     {
         MulticoreMutexLock lock(IpcMsgGate::PRINT);
         printf("[M7] ");
         vprintf(format, args);
     }
-
-    // Clean up
     va_end(args);
 }
 
-void notifyM4(IpcMsgType type, bbox_vector_t *bboxes, image_vector_t *image, int image_size, uint8_t gate) {
+void notifyM4(IpcMsgType type, uint8_t gate = IpcMsgGate::OTHER, int image_size = 0, image_vector_t *img_b = nullptr, image_vector_t *img_a = nullptr, image_vector_t *jpeg = nullptr, bbox_vector_t *bboxes = nullptr) {
     auto *ipc = IpcM7::GetSingleton();
     IpcMessage msg{};
     msg.type = IpcMessageType::kApp;
     auto *app_msg = reinterpret_cast<IpcMessageStruct *>(&msg.message.data);
+
     app_msg->type       = type;
+    app_msg->image_b    = img_b;
+    app_msg->image_a    = img_a;
+    app_msg->jpeg       = jpeg;
     app_msg->bboxes     = bboxes;
-    app_msg->image      = image;
     app_msg->image_size = image_size;
     app_msg->gate       = gate;
 
@@ -160,11 +164,10 @@ void notifyM4(IpcMsgType type, bbox_vector_t *bboxes, image_vector_t *image, int
 
 void HandleM4Message(const uint8_t data[kIpcMessageBufferDataSize]) {
     const auto *msg = reinterpret_cast<const IpcMessageStruct *>(data);
-    
+
     if (msg->type == IpcMsgType::ACK)
         xTaskNotifyGive(main_task_handle);
 }
-
 
 
 /*----(CONFIG HANDLING)----*/
@@ -540,7 +543,6 @@ static void detectTask(void *args) {
             printfM7("failed to acquire img mutex\n");
             continue;
         }
-
         if (!ret) {
             printfM7("Failed to get image from camera.\r\n");
             setStatus(-1);
@@ -845,22 +847,17 @@ extern "C" [[noreturn]] void app_main(void* param) {
     IpcM7::GetSingleton()->RegisterAppMessageHandler(HandleM4Message);
     IpcM7::GetSingleton()->StartM4();
     CHECK(IpcM7::GetSingleton()->M4IsAlive(500));
-    
-    notifyM4(IpcMsgType::IMAGE_SIZE, nullptr, nullptr, image_size, IpcMsgGate::OTHER);
-    printfM7("Waiting for M4 ACK\n");
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    printfM7("Got ack from M4\n");
+
+
+    //notifyM4(IpcMsgType::CONFIG, IpcMsgGate::OTHER, image_size, &image_before, &image_after, &jpeg, &bboxes);
+    //ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    //printfM7("M4 got config\n");
 
     xTaskCreate(detectTask, "detect", 8192, nullptr, 0, &detect_task_handle);
     PostHttpServer http_server;
     http_server.registerPostUriHandler(postUriHandler);
     http_server.AddUriHandler(UriHandler);
     UseHttpServer(&http_server);
-    
-    while(true) {
-        printfM7("ALIVE\n");
-        vTaskDelay(2000);
-    }
 
     vTaskSuspend(nullptr);
 }
