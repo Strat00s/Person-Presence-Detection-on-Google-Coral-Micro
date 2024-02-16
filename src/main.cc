@@ -1,5 +1,5 @@
 //TODO mark detected after 3 out of 5 consecutive frames
-
+//TODO move it to detector
 //TODO final structure:
 //bbox
 //score
@@ -7,6 +7,8 @@
 
 //TODO move stuff to m4 core
 //TODO move stuff to own classes
+
+//TODO watchdog
 
 //TODO output to pin
 //TODO output on LED
@@ -34,6 +36,9 @@
 #include <numeric>
 #include <deque>
 
+#include "libs/base/mutex.h"
+#include "libs/base/ipc_m7.h"
+#include "libs/base/main_freertos_m7.h"
 #include "libs/base/http_server.h"
 #include "libs/base/led.h"
 #include "libs/base/strings.h"
@@ -58,10 +63,13 @@
 //#include "x86_64-linux-gnu/sys/time.h"
 
 #include "local_libs/http_server.h"
+#include "structs.hpp"
+#include "ipc_message.hpp"
 
 using namespace coralmicro;
 using namespace std;
 
+#define CORE_TAG "[M7] "
 
 #define MAIN_WEB_PATH         "/page.html"
 #define STREAM_WEB_PATH       "/camera_stream"
@@ -87,21 +95,10 @@ using namespace std;
 STATIC_TENSOR_ARENA_IN_SDRAM(tensor_arena, TENSOR_ARENA_SIZE);
 
 
-typedef std::vector<uint8_t> imageVector_t;
+//typedef std::vector<uint8_t> imageVector_t;
 
 
 int image_size   = DEFAULT_IMAGE_SIZE;
-typedef struct cfg_struct{
-    int mask_size    = DEFAULT_MASK_SIZE;
-    std::vector<uint8_t> mask;
-    int rotation     = DEFAULT_ROTATION;
-    int det_thresh   = DEFAULT_DET_THRESH;
-    int iou_thresh   = DEFAULT_IOU_THRESH;
-    int fp_change    = DEFAULT_FP_CHANGE;
-    int fp_count     = DEFAULT_FP_COUNT;
-    int jpeg_quality = DEFAULT_JPEG_QUALITY;
-    cfg_struct() {mask.resize(mask_size * mask_size, 0);}
-} cfg_struct_t;
 cfg_struct_t config;
 
 
@@ -124,21 +121,52 @@ imageVector_t last_frame; // last empty frame before any detection happens
 int detected = 0;
 
 
-typedef struct {
-    int ymin;
-    int xmin;
-    int ymax;
-    int xmax;
-    int score;
-} bbox_t;
 std::vector<bbox_t> results;
-
-
 int detect_cnt = 0;
 std::deque<bool> detected_buf(5, false);
 
 
+/*----(IPC)----*/
+void printfM7(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+
+    // Calculate the size of the new format string with prefix and original format
+    size_t prefixLength = strlen(CORE_TAG);
+    size_t formatLength = strlen(format);
+    size_t newFormatLength = prefixLength + formatLength;
+    char *newFormat = new char[newFormatLength + 1]; // +1 for the null terminator
+
+    // Create the new format string with the prefix
+    strcpy(newFormat, CORE_TAG);
+    strcat(newFormat, format);
+
+    // Call vprintf with the new format string and the original variadic arguments
+    {
+        MulticoreMutexLock lock(IpcMsgGate::PRINT);
+        vprintf(newFormat, args);
+    }
+
+    // Clean up
+    va_end(args);
+    delete[] newFormat;
+}
+
+
 /*----(CONFIG HANDLING)----*/
+cfg_struct_t buildDefaultConfig() {
+    cfg_struct_t cfg;
+    cfg.mask_size    = DEFAULT_MASK_SIZE;
+    cfg.rotation     = DEFAULT_ROTATION;
+    cfg.det_thresh   = DEFAULT_DET_THRESH;
+    cfg.iou_thresh   = DEFAULT_IOU_THRESH;
+    cfg.fp_change    = DEFAULT_FP_CHANGE;
+    cfg.fp_count     = DEFAULT_FP_COUNT;
+    cfg.jpeg_quality = DEFAULT_JPEG_QUALITY;
+    cfg.mask.resize(cfg.mask_size * cfg.mask_size, 0);
+    return cfg;
+}
+
 /** @brief build config csv from current config 
  * 
  * @param config 
@@ -174,7 +202,7 @@ int saveConfig(std::string config_csv) {
     int field_num = -1;
     size_t start = 0;
     size_t end = config_csv.find(',');
-    cfg_struct_t new_config;
+    cfg_struct_t new_config = buildDefaultConfig();
 
     if (!new_config.mask.size()) {
         printf("UH OH\n");
@@ -214,6 +242,7 @@ int saveConfig(std::string config_csv) {
         }
         catch(const std::exception& e) {
             printf("%s\n", e.what());
+            malformed = true;
             continue;
         }
 
@@ -266,17 +295,13 @@ int saveConfigFile(std::string config_csv) {
 int loadConfigFile(std::string *str) {
     if (!LfsFileExists(CONFIG_PATH)) {
         *str = buildConfigCsv(config);
-        saveConfigFile(*str);
-        return 0;
+        return saveConfigFile(*str);
     }
 
     if (!LfsReadFile(CONFIG_PATH, str))
-        return 1;
+        return 4;
 
-    if (saveConfig(*str))
-        return -2;
-
-    return 0;
+    return saveConfig(*str);
 }
 
 
@@ -432,10 +457,10 @@ std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, const imag
         detected++;
 
         bbox_t bbox = {
-            .ymin  = std::max(0, static_cast<int>(bboxes[4 * i]     * image_size + 0.5f)),
             .xmin  = std::max(0, static_cast<int>(bboxes[4 * i + 1] * image_size + 0.5f)),
-            .ymax  = std::max(0, static_cast<int>(bboxes[4 * i + 2] * image_size + 0.5f)),
+            .ymin  = std::max(0, static_cast<int>(bboxes[4 * i]     * image_size + 0.5f)),
             .xmax  = std::max(0, static_cast<int>(bboxes[4 * i + 3] * image_size + 0.5f)),
+            .ymax  = std::max(0, static_cast<int>(bboxes[4 * i + 2] * image_size + 0.5f)),
             .score = scores[i] * 100 + 0.5f
         };
         tmp_results.push_back(bbox);
@@ -697,7 +722,7 @@ HttpServer::Content UriHandler(const char* uri) {
         return std::vector<uint8_t>(cfg_csv.begin(), cfg_csv.end());
     }
     else if (StrEndsWith(uri, CONFIG_RESET_WEB_PATH)) {
-        cfg_struct_t default_config;
+        cfg_struct_t default_config = buildDefaultConfig();
         std::string cfg_csv = buildConfigCsv(default_config);
         int ret = saveConfigFile(cfg_csv);
         if (ret) {
@@ -729,11 +754,11 @@ std::string postUriHandler(std::string uri, std::vector<uint8_t> payload) {
 
 
 
-extern "C" void app_main(void* param) {
+extern "C" [[noreturn]] void app_main(void* param) {
     (void)param;
 
     LedSet(Led::kStatus, true);
-    config.mask.resize(config.mask_size * config.mask_size, 0);
+    config = buildDefaultConfig();
 
     // Try and get an IP
     std::optional<std::string> our_ip_addr;
@@ -800,7 +825,7 @@ extern "C" void app_main(void* param) {
     }
     printf("Config loaded\n");
 
-
+    
     xTaskCreate(detectTask, "detect", 8192, nullptr, 0, &detect_task_handle);
     PostHttpServer http_server;
     http_server.registerPostUriHandler(postUriHandler);
