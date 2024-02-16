@@ -35,3 +35,6 @@ TLDR: optimization is a must. But first.
 
 ## Exceptions and crashes
 no clue, but you can edit coralmicro/cmake/toolchain-arm-none-eabi-gcc.cmake to add arguments to build.
+
+## Multicore
+Camera capture on M4 take over half a second (compared to about 30ms on M7...)
