@@ -1,7 +1,8 @@
 #pragma once
 
+#include <vector>
 #include "libs/base/ipc_message_buffer.h"
-#include "vector"
+#include "structs.hpp"
 
 //message type
 //pointer to data
@@ -38,11 +39,13 @@ enum IpcMsgGate {
 };
 
 
+//I am too lazy to do it properly so this will have to do for now
 struct IpcMessageStruct {
-    IpcMsgType type;       //data type
-    std::vector<int> *data; //pointer to data (stored lineary)
-    uint8_t item_cnt = 1;   //how many items are stored in the vector
-    uint8_t gate;           //gate for thredsafe access to data
+    IpcMsgType type; //data type
+    bbox_vector_t *bboxes;
+    image_vector_t *image;
+    int image_size;
+    uint8_t gate; //gate for thredsafe access to data
 } __attribute__((packed));
 
 static_assert(sizeof(IpcMessageStruct) <= coralmicro::kIpcMessageBufferDataSize);

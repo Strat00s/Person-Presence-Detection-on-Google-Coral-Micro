@@ -1,9 +1,10 @@
 #pragma once
 
 #include <vector>
+#include <variant>
 #include <stdint.h>
 
-typedef std::vector<uint8_t> imageVector_t;
+typedef std::vector<uint8_t> image_vector_t;
 
 typedef struct {
     int xmin;
@@ -14,7 +15,9 @@ typedef struct {
     int type;
 } bbox_t;
 
-typedef struct cfg_struct{
+typedef std::vector<bbox_t> bbox_vector_t;
+
+typedef struct{
     int mask_size;
     std::vector<uint8_t> mask;
     int rotation;

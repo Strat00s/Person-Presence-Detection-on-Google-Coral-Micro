@@ -1,3 +1,6 @@
+#include <vector>
+#include <cstdarg>
+
 #include "libs/base/ipc_m4.h"
 #include "libs/base/main_freertos_m4.h"
 #include "libs/base/mutex.h"
@@ -16,10 +19,11 @@ using namespace std;
 
 
 std::vector<bbox_t> bboxes;
-std::vector<imageVector_t> images;
+std::vector<image_vector_t> images;
 
-imageVector_t m7_image;
-imageVector_t m4_image;
+image_vector_t m7_image;
+image_vector_t m4_image;
+int image_size = 0;
 
 SemaphoreHandle_t bbox_mux;
 SemaphoreHandle_t image_mux; //local m4 only mux for image access
@@ -29,7 +33,6 @@ TaskHandle_t camera_task_handle;
 TaskHandle_t web_task_handle;
 
 CameraFrameFormat frame;
-int image_size = 320;
 
 
 #define CORE_TAG "[M4] "
@@ -38,27 +41,30 @@ void printfM4(const char* format, ...) {
     va_list args;
     va_start(args, format);
 
-    // Calculate the size of the new format string with prefix and original format
-    size_t prefixLength = strlen(CORE_TAG);
-    size_t formatLength = strlen(format);
-    size_t newFormatLength = prefixLength + formatLength;
-    char *newFormat = new char[newFormatLength + 1]; // +1 for the null terminator
-
-    // Create the new format string with the prefix
-    strcpy(newFormat, CORE_TAG);
-    strcat(newFormat, format);
-
     // Call vprintf with the new format string and the original variadic arguments
     {
         MulticoreMutexLock lock(IpcMsgGate::PRINT);
-        vprintf(newFormat, args);
+        printf("[M4] ");
+        vprintf(format, args);
     }
 
     // Clean up
     va_end(args);
-    delete[] newFormat;
 }
 
+void notifyM7(IpcMsgType type, bbox_vector_t *bboxes, image_vector_t *image, int image_size, uint8_t gate) {
+    auto *ipc = IpcM4::GetSingleton();
+    IpcMessage msg{};
+    msg.type = IpcMessageType::kApp;
+    auto *app_msg = reinterpret_cast<IpcMessageStruct *>(&msg.message.data);
+    app_msg->type       = type;
+    app_msg->bboxes     = bboxes;
+    app_msg->image      = image;
+    app_msg->image_size = image_size;
+    app_msg->gate       = gate;
+
+    ipc->SendMessage(msg);
+}
 
 void HandleM7Message(const uint8_t data[kIpcMessageBufferDataSize]) {
     const auto *msg = reinterpret_cast<const IpcMessageStruct *>(data);
@@ -66,26 +72,21 @@ void HandleM7Message(const uint8_t data[kIpcMessageBufferDataSize]) {
     if (msg->type == IpcMsgType::BBOX) {
         {
             MulticoreMutexLock lock(msg->gate);
-            for (int i = 0; i < msg->item_cnt * 6; i += 6) {
-                bboxes.push_back({
-                    .xmin  = (*msg->data)[i],
-                    .ymin  = (*msg->data)[i + 1],
-                    .xmax  = (*msg->data)[i + 2],
-                    .ymax  = (*msg->data)[i + 3],
-                    .score = (*msg->data)[i + 4],
-                    .type  = (*msg->data)[i + 5]
-                });
-            }
+            bboxes = (*msg->bboxes);
         }
     }
 
     if (msg->type == IpcMsgType::IMAGE_SIZE) {
         {
             MulticoreMutexLock lock(msg->gate);
-            image_size = (*msg->data)[0];
+            image_size = msg->image_size;
         }
+
         xTaskNotifyGive(main_task_handle);
     }
+
+    if (msg->type == IpcMsgType::ACK)
+        xTaskNotifyGive(main_task_handle);
 }
 
 static void cameraTask(void *args) {
@@ -95,6 +96,7 @@ static void cameraTask(void *args) {
     }
     
 }
+
 
 extern "C" [[noreturn]] void app_main(void *param) {
     (void)param;
@@ -109,6 +111,8 @@ extern "C" [[noreturn]] void app_main(void *param) {
     //wait for initial image size from M7
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     printfM4("Got image size from M7: %d\n", image_size);
+    notifyM7(IpcMsgType::ACK, nullptr, nullptr, 0, IpcMsgGate::OTHER);
+
 
     //CameraTask::GetSingleton()->Init(I2C5Handle());
     //CameraTask::GetSingleton()->SetPower(true);

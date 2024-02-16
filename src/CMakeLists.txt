@@ -13,23 +13,10 @@
 # limitations under the License.
 
 
-
-set(BASE_LIBRARIES
-    libs_base-m7_freertos
-)
-
-set(CAMERA_LIBRARIES
-    libs_jpeg_m7
-)
-
-set(STREAMING_LIBRARIES
-    libs_base-m7_http_server
-    libs_base-m7_ethernet
-)
-
-# USB
 add_executable_m7(my_project
-    main.cc
+    main.cpp
+    M4_EXECUTABLE
+    my_project_m4
     DATA
     ${CMAKE_CURRENT_SOURCE_DIR}/web/page.html>/page.html
     ${CMAKE_CURRENT_SOURCE_DIR}/web/responses/200.html>/200.html
@@ -38,7 +25,15 @@ add_executable_m7(my_project
 
 target_link_libraries(my_project
     libs_base-m7_freertos
-    ${BASE_LIBRARIES}
-    ${CAMERA_LIBRARIES}
-    ${STREAMING_LIBRARIES}
+    libs_jpeg_m7
+    libs_base-m7_http_server
+    libs_base-m7_ethernet
+)
+
+add_executable_m4(my_project_m4
+    main_m4.cpp
+)
+
+target_link_libraries(my_project_m4
+    libs_base-m4_freertos
 )
