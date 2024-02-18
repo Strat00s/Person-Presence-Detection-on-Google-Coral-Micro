@@ -5,10 +5,12 @@
 //score
 //type of detection (false positive, masked, unmasked but not yet full, full)
 
-//TODO move stuff to m4 core
-//TODO move stuff to own classes
+//TODO threadsafe deque or vector
 
-//TODO watchdog
+//TODO move drawing into web page?
+//Send image (jpeg?) with bboxes
+
+//TODO move stuff to own classes
 
 //TODO output to pin
 //TODO output on LED
@@ -20,14 +22,14 @@
 
 //TODO has changed average -> better calculcations
 
+//TODO watchdog ?
+
 //TODO detect brightness change
 //if big enough, update current last frame even if something is detected (update only parts with not detections)
 
 //TODO configurable grid size
 //TODO rotation
 //TODO status update to webpage
-
-//TODO UI???
 
 #include <cstdio>
 #include <vector>
@@ -37,9 +39,6 @@
 #include <deque>
 #include <cstdarg>
 
-#include "libs/base/mutex.h"
-#include "libs/base/ipc_m7.h"
-#include "libs/base/main_freertos_m7.h"
 #include "libs/base/http_server.h"
 #include "libs/base/led.h"
 #include "libs/base/strings.h"
@@ -66,11 +65,11 @@
 #include "local_libs/http_server.h"
 #include "structs.hpp"
 #include "ipc_message.hpp"
+#include "AwaitQueue.hpp"
 
 using namespace coralmicro;
 using namespace std;
 
-#define CORE_TAG "[M7] "
 
 #define MAIN_WEB_PATH         "/page.html"
 #define STREAM_WEB_PATH       "/camera_stream"
@@ -88,92 +87,37 @@ using namespace std;
 #define DEFAULT_FP_CHANGE    40
 #define DEFAULT_FP_COUNT     5
 #define DEFAULT_JPEG_QUALITY 75
-
-
-#define IDX(x, y, width) (y * width + x) * 3;
+#define DEFAULT_MASK_THRESH  50
 
 #define TENSOR_ARENA_SIZE     8 * 1024 * 1024
 STATIC_TENSOR_ARENA_IN_SDRAM(tensor_arena, TENSOR_ARENA_SIZE);
 
 
-//typedef std::vector<uint8_t> image_vector_t;
-
-
-int image_size   = DEFAULT_IMAGE_SIZE;
-cfg_struct_t config;
-
-
+//int image_size   = DEFAULT_IMAGE_SIZE;
 tflite::MicroMutableOpResolver<3> resolver;
 tflite::MicroInterpreter *interpreter; //must be created and configured in the main task for some reason
 tflite::MicroErrorReporter error_reporter;
 
-image_vector_t image;
-CameraFrameFormat frame;
-
-SemaphoreHandle_t status_mux;
-SemaphoreHandle_t image_mux;
-SemaphoreHandle_t result_mux;
+int image_size = DEFAULT_IMAGE_SIZE;
+cfg_struct_t global_config;
+bool update_config = true;
 SemaphoreHandle_t config_mux;
-int status;
 
 TaskHandle_t detect_task_handle; // detector task handle
-TaskHandle_t main_task_handle;
 
-image_vector_t last_frame; // last empty frame before any detection happens
-int detected = 0;
+AwaitQueue<web_task_msg_t> result_queue(2);
 
 
-std::vector<bbox_t> results;
-int detect_cnt = 0;
-std::deque<bool> detected_buf(5, false);
-
-//pointers to the underlying structures made in M4 for access
-image_vector_t image_before;
-image_vector_t image_after;
-image_vector_t jpeg;
-bbox_vector_t bboxes;
-
-/*----(IPC)----*/
-void printfM7(const char* format, ...) {
-    va_list args;
-    va_start(args, format);
-    {
-        MulticoreMutexLock lock(IpcMsgGate::PRINT);
-        printf("[M7] ");
-        vprintf(format, args);
-    }
-    va_end(args);
+void exit() {
+    printf("Exiting...\n");
+    vTaskSuspend(NULL);
 }
-
-void notifyM4(IpcMsgType type, uint8_t gate = IpcMsgGate::OTHER, int image_size = 0, image_vector_t *img_b = nullptr, image_vector_t *img_a = nullptr, image_vector_t *jpeg = nullptr, bbox_vector_t *bboxes = nullptr) {
-    auto *ipc = IpcM7::GetSingleton();
-    IpcMessage msg{};
-    msg.type = IpcMessageType::kApp;
-    auto *app_msg = reinterpret_cast<IpcMessageStruct *>(&msg.message.data);
-
-    app_msg->type       = type;
-    app_msg->image_b    = img_b;
-    app_msg->image_a    = img_a;
-    app_msg->jpeg       = jpeg;
-    app_msg->bboxes     = bboxes;
-    app_msg->image_size = image_size;
-    app_msg->gate       = gate;
-
-    ipc->SendMessage(msg);
-}
-
-void HandleM4Message(const uint8_t data[kIpcMessageBufferDataSize]) {
-    const auto *msg = reinterpret_cast<const IpcMessageStruct *>(data);
-
-    if (msg->type == IpcMsgType::ACK)
-        xTaskNotifyGive(main_task_handle);
-}
-
 
 /*----(CONFIG HANDLING)----*/
 cfg_struct_t buildDefaultConfig() {
     cfg_struct_t cfg;
     cfg.mask_size    = DEFAULT_MASK_SIZE;
+    cfg.mask_thresh  = DEFAULT_MASK_THRESH;
     cfg.rotation     = DEFAULT_ROTATION;
     cfg.det_thresh   = DEFAULT_DET_THRESH;
     cfg.iou_thresh   = DEFAULT_IOU_THRESH;
@@ -184,67 +128,46 @@ cfg_struct_t buildDefaultConfig() {
     return cfg;
 }
 
-/** @brief build config csv from current config 
+/** @brief Generate config from csv
  * 
+ * @param csv 
  * @param config 
- * @return std::string 
+ * @return true on success, false on invalid csv (csv has less tha 8 fields)
  */
-std::string buildConfigCsv(cfg_struct_t config) {
-    std::string cfg = std::to_string(config.mask_size) + ',';
-    for (auto val: config.mask)
-        cfg += std::to_string(val);
-    cfg += ',';
-    cfg += std::to_string(config.rotation)   + ',';
-    cfg += std::to_string(config.det_thresh) + ',';
-    cfg += std::to_string(config.iou_thresh) + ',';
-    cfg += std::to_string(config.fp_change)  + ',';
-    cfg += std::to_string(config.fp_count)   + ',';
-    cfg += std::to_string(config.jpeg_quality);
-    return cfg;
-}
-
-/** @brief Partse config csv string and save it to global variables
- * 
- * @param config_csv string with valid csv
- * @return 0 on success, 1 on failure to acquire mutex 
-*/
-int saveConfig(std::string config_csv) {
-    if (std::count(config_csv.begin(), config_csv.end(), ',') < 7) {
-        printfM7("invalid csv\n");
-        return 2;
+bool configFromCsv(const std::string &csv, cfg_struct_t *config) {
+    if (std::count(csv.begin(), csv.end(), ',') < 7) {
+        printf("invalid csv\n");
+        return false;
     }
 
     bool malformed = false;
     bool finished = false;
     int field_num = -1;
     size_t start = 0;
-    size_t end = config_csv.find(',');
+    size_t end = csv.find(',');
     cfg_struct_t new_config = buildDefaultConfig();
-
-    if (!new_config.mask.size()) {
-        printfM7("UH OH\n");
-        vTaskDelay(100000);
-    }
 
     while (!finished) {
         field_num++;
         if (end == std::string::npos) {
             finished = true;
-            end = config_csv.size();
+            end = csv.size();
         }
-        std::string field_val = config_csv.substr(start, end - start);
-        printfM7("%d %s %d %d\n", field_num, field_val.c_str(), start, end);
+        std::string field_val = csv.substr(start, end - start);
 
+        printf("%d %s %d %d\n", field_num, field_val.c_str(), start, end);
         vTaskDelay(10);
 
         start = end + 1;
-        end = config_csv.find(',', start);
+        end = csv.find(',', start);
 
+        //skip malformed fields
         if (field_val.size() == 0) {
             malformed = true;
             continue;
         }
 
+        //mask field
         if (field_num == 1) {
             new_config.mask.clear();
             new_config.mask.reserve(field_val.size());
@@ -253,103 +176,119 @@ int saveConfig(std::string config_csv) {
             continue;
         }
 
+        //try to convert the field to number
         int val = 0;
         try {
             val = std::stoi(field_val);
         }
         catch(const std::exception& e) {
-            printfM7("%s\n", e.what());
+            printf("%s\n", e.what());
             malformed = true;
             continue;
         }
 
+        //everything but mask
         switch (field_num) {
             case 0: new_config.mask_size    = val; break;
+            //case 1: new_config.mask_thresh    = val; break;
+            //move all by one
             case 2: new_config.rotation     = val; break;
             case 3: new_config.det_thresh   = val; break;
             case 4: new_config.iou_thresh   = val; break;
             case 5: new_config.fp_change    = val; break;
             case 6: new_config.fp_count     = val; break;
             case 7: new_config.jpeg_quality = val; break;
-            default: printfM7("Unhandled field %d: %s\n", field_num, field_val.c_str()); break;
+            default: printf("Unhandled field %d: %s\n", field_num, field_val.c_str()); break;
         }
     }
 
-    if (malformed) {
+    if (malformed)
         new_config.mask.resize(new_config.mask_size * new_config.mask_size, 0);
-        LfsWriteFile(CONFIG_PATH, buildConfigCsv(new_config));
-    }
 
-    if (xSemaphoreTake(config_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
-        config = new_config;
-        xSemaphoreGive(config_mux);
-        printfM7("config saved\n");
-        return 0;
-    }
-
-    printfM7("Failed to get config mutex\n");
-    return 1;
+    *config = new_config;
+    return true;
 }
 
-/** @brief Save configuration csv (in string form) to file and update global variables
+/** @brief 
  * 
- * @param config_csv csv string
- * @return int 0 on success, 1 on failure to write to file, 2 when failed to update global variables
+ * @param config 
+ * @return std::string 
  */
-int saveConfigFile(std::string config_csv) {
-    //write the csv string to file
-    if (!LfsWriteFile(CONFIG_PATH, config_csv))
-        return 3;
-
-    //save it to config variable
-    return saveConfig(config_csv);
+std::string csvFromConfig(const cfg_struct_t &config) {
+    std::string csv = std::to_string(config.mask_size) + ',';
+    //std::string cfg = std::to_string(config.mask_thresh) + ',';
+    for (auto val: config.mask)
+        csv += std::to_string(val);
+    csv += ',';
+    csv += std::to_string(config.rotation)   + ',';
+    csv += std::to_string(config.det_thresh) + ',';
+    csv += std::to_string(config.iou_thresh) + ',';
+    csv += std::to_string(config.fp_change)  + ',';
+    csv += std::to_string(config.fp_count)   + ',';
+    csv += std::to_string(config.jpeg_quality);
+    return csv;
 }
 
-/** @brief Load config csv from a file or generate it if file does not exist and update global variables
+/** @brief Write csv config to file
  * 
- * @return config csv string on success, empty on failure
+ * @param csv 
+ * @return true on success, false otherwise
  */
-int loadConfigFile(std::string *str) {
-    if (!LfsFileExists(CONFIG_PATH)) {
-        *str = buildConfigCsv(config);
-        return saveConfigFile(*str);
-    }
+bool writeConfigFile(const std::string &csv) {
+    return LfsWriteFile(CONFIG_PATH, csv);
+}
 
-    if (!LfsReadFile(CONFIG_PATH, str))
-        return 4;
-
-    return saveConfig(*str);
+/** @brief Read csv config from file
+ * 
+ * @return empty string on failure
+ */
+std::string readConfigFile() {
+    std::string config_csv;
+    if (!LfsReadFile(CONFIG_PATH, &config_csv))
+        return {};
+    return config_csv;
 }
 
 
 /*----(IMAGE DRAWING)----*/
-void drawRectangleFast(int xmin, int ymin, int xmax, int ymax, image_vector_t *image, int image_size, uint8_t r, uint8_t g, uint8_t b) {
-    if (xmin < 0)
-        xmin = 0;
-    if (ymin < 0)
-        ymin = 0;
-    if (xmax > image_size)
-        xmax = image_size;
-    if (ymax > image_size)
-        ymax = image_size;
+/** @brief Simple function to draw rectangles into raw picture
+ * 
+ * @param bbox bounding box to be drawn
+ * @param image image to which to draw
+ * @param image_size image size
+ * @param r red channel value
+ * @param g green channel value
+ * @param b bluc channel value
+ */
+void drawRectangleFast(bbox_t bbox, image_vector_t *image, int image_size, uint8_t r, uint8_t g, uint8_t b) {
+    if (bbox.xmin < 0)
+        bbox.xmin = 0;
+    if (bbox.ymin < 0)
+        bbox.ymin = 0;
+    if (bbox.xmax > image_size)
+        bbox.xmax = image_size;
+    if (bbox.ymax > image_size)
+        bbox.ymax = image_size;
 
     //draw top and bottom sides
-    int max_start = (ymax * image_size + xmin) * 3;
-    int min_start = (ymin * image_size + xmin) * 3;
+    int max_start = (bbox.ymax * image_size + bbox.xmin) * 3;
+    int min_start = (bbox.ymin * image_size + bbox.xmin) * 3;
     int step = 3;
-    for (int i = 0; i < (xmax - xmin) * step; i += step) {
-        (*image)[min_start + i]     = r;
-        (*image)[min_start + i + 1] = g;
-        (*image)[min_start + i + 2] = b;
+    int end = (bbox.xmax - bbox.xmin) * step;
+    for (int i = 0; i < end; i += step) {
         (*image)[max_start + i]     = r;
         (*image)[max_start + i + 1] = g;
         (*image)[max_start + i + 2] = b;
+        (*image)[min_start + i]     = r;
+        (*image)[min_start + i + 1] = g;
+        (*image)[min_start + i + 2] = b;
     }
 
     //draw left and right sides
-    max_start = (ymin * image_size + xmax) * 3;
+    max_start = (bbox.ymin * image_size + bbox.xmax) * 3;
     step = image_size * 3;
-    for (int i = 0; i < (ymax - ymin) * step; i += step) {
+    end = (bbox.ymax - bbox.ymin) * step;
+    for (int i = 0; i < end; i += step) {
         (*image)[max_start + i]     = r;
         (*image)[max_start + i + 1] = g;
         (*image)[max_start + i + 2] = b;
@@ -366,7 +305,16 @@ inline bool isInsideBox(int x, int y, int x_min, int x_max, int y_min, int y_max
     return (x >= x_min && x <= x_max && y >= y_min && y <= y_max);
 }
 
-bool isMasked(int x_min, int x_max, int y_min, int y_max, int image_size, const image_vector_t& mask, int mask_size) {
+/** @brief Check if enough bbox is masked
+ * 
+ * @param bbox 
+ * @param mask 
+ * @param mask_size 
+ * @param image_size 
+ * @param threshold
+ * @return true if masked, false if not
+ */
+bool isBBoxMasked(bbox_t bbox, const image_vector_t& mask, int mask_size, int image_size, float threshold) {
     // Scale factor from the image size to grid size.
     const int scale = image_size / mask_size;
 
@@ -374,14 +322,14 @@ bool isMasked(int x_min, int x_max, int y_min, int y_max, int image_size, const 
     int totalCells = 0;
 
     // Iterate over the box's range.
-    for (int y = y_min; y <= y_max; y++) {
-        for (int x = x_min; x <= x_max; x++) {
+    for (int y = bbox.ymin; y <= bbox.ymax; y++) {
+        for (int x = bbox.xmin; x <= bbox.xmax; x++) {
             // Map the image coordinates to grid coordinates.
             int gridX = x / scale;
             int gridY = y / scale;
 
             // Check if the current point is inside the box.
-            if (isInsideBox(gridX, gridY, x_min/scale, x_max/scale, y_min/scale, y_max/scale)) {
+            if (isInsideBox(gridX, gridY, bbox.xmin/scale, bbox.xmax/scale, bbox.ymin/scale, bbox.ymax/scale)) {
                 // Index in the grid
                 int index = gridY * mask_size + gridX;
 
@@ -392,41 +340,41 @@ bool isMasked(int x_min, int x_max, int y_min, int y_max, int image_size, const 
         }
     }
 
-    //printfM7("%d %d %d %d\n", coveredCells, totalCells, mask_size, mask.size());
+    //printf("%d %d %d %d\n", coveredCells, totalCells, mask_size, mask.size());
 
+    //TODO fix
+    //TODO threshold
     // Check if at least half of the box is covered by non-toggled cells.
     return coveredCells > totalCells / 2;
 }
 
 
-//TODO move into own class
-void setStatus(int s) {
-    if (xSemaphoreTake(status_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
-        status = s;
-        xSemaphoreGive(status_mux);
-    }
-    else
-        printfM7("failed to acquire det mutex\n");
-}
-
-// Function to check if the specified region has changed significantly - average color approach
-bool hasChangedAverage(const image_vector_t &currentImage, const image_vector_t &previousImage, int image_size, int xmin, int ymin, int xmax, int ymax, float change, float count) {
+/*----(DETECTION HADNLING)----*/
+/** @brief Function to check if the specified region has changed significantly - average color approach
+ * 
+ * @param current_image 
+ * @param previous_image 
+ * @param image_size 
+ * @param bbox bounding vox
+ * @param change How much individual pixels need to change to be counted
+ * @param count How many pixels have to change
+ * @return true if changed enough, false otherwise
+ */
+bool hasBBoxChanged(const image_vector_t &current_image, const image_vector_t &previous_image, int image_size, bbox_t bbox, float change, float count) {
     int32_t changed = 0;
-    int32_t pixel_cnt = (xmax - xmin + 1) * (ymax - ymin + 1);
-    for (int y = ymin; y <= ymax; ++y) {
-        for (int x = xmin; x <= xmax; ++x) {
+    int32_t pixel_cnt = (bbox.xmax - bbox.xmin + 1) * (bbox.ymax - bbox.ymin + 1);
+    for (int y = bbox.ymin; y <= bbox.ymax; ++y) {
+        for (int x = bbox.xmin; x <= bbox.xmax; ++x) {
             size_t index = (y * image_size + x) * 3;
-            int pixel_change = std::abs(currentImage[index] - previousImage[index]) +
-                               std::abs(currentImage[index + 1] - previousImage[index + 1]) +
-                               std::abs(currentImage[index + 2] - previousImage[index + 2]);
-            if (pixel_change > 255 * change)
+            int pixel_change = std::abs(current_image[index] - previous_image[index]) +
+                               std::abs(current_image[index + 1] - previous_image[index + 1]) +
+                               std::abs(current_image[index + 2] - previous_image[index + 2]);
+            if (pixel_change > 0xFF * 3 * change)
                 changed++;
         }
     }
 
-    //printfM7("changed, pixelcnt: %ld %ld\n", changed, pixel_cnt);
-
-    return changed > (int32_t)std::round(pixel_cnt * count);
+    return changed > std::round(pixel_cnt * count);
 }
 
 /** @brief Intersection over union calculations for overlaping bounding boxes
@@ -443,9 +391,32 @@ float IoU(const bbox_t& a, const bbox_t& b) {
     return intersectionArea / unionArea;
 }
 
-//std::vector<tensorflow::Object> getResults(tflite::MicroInterpreter *interpreter, float threshold, float iou_threshold) {
-std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, const image_vector_t &image, const image_vector_t &last_image,
-                               int image_size, float threshold, float iou_threshold, float fp_change, float fp_count) {
+/** @brief Get results from inference.
+ * 1. get all bboxes with person id
+ * 2. NMS
+ * 3. calculate masked and detected
+ * 3. calculate change against background
+ * 
+ * @param results vector where to store resulting bboxes
+ * @param interpreter tflite interpreter
+ * @param image current image
+ * @param background last background image to compare against
+ * @param config current config
+ * @return 0 if nothing is detected.
+ * 1 if something is detected and masked.
+ * 2 if something detected and unmasked.
+ * 3 if something is detected, unmasked and 3/5 consecutive detection.
+ */
+int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpreter, const image_vector_t &image,
+                                                    const image_vector_t &background, const cfg_struct_t &config) {
+
+    static int consec_unmasked = 0; //keeps count of consecutive unmasked detections
+
+    //get data from output tensor
+    float det_thresh = config.det_thresh / 100.0f;
+    float iou_thresh = config.iou_thresh / 100.0f;
+    float fp_change  = config.fp_change  / 100.0f;
+    float fp_count   = config.fp_count   / 100.0f;
     float *bboxes, *ids, *scores, *count;
     if (interpreter->output_tensor(2)->dims->size == 1) {
         scores = tflite::GetTensorData<float>(interpreter->output_tensor(0));
@@ -460,32 +431,46 @@ std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, const imag
         count  = tflite::GetTensorData<float>(interpreter->output_tensor(3));
     }
 
-    detected = 0;
-    size_t cnt = static_cast<size_t>(count[0]);
-    std::vector<bbox_t> tmp_results, results;
-    for (size_t i = 0; i < cnt; ++i) {
-        // skip non-person objects (should be good enough)
-        if ((int)std::round(ids[i]))
+    std::vector<bbox_t> tmp_results;
+    size_t cnt = static_cast<int>(count[0]);
+    for (int i = 0; i < cnt; ++i) {
+        //skip object with id != 0 (not person) and below threshold
+        if (!std::round(ids[i]) || scores[i] < det_thresh)
             continue;
-
-        if (scores[i] < threshold)
-            continue;
-
-        detected++;
 
         bbox_t bbox = {
-            .xmin  = std::max(0, static_cast<int>(bboxes[4 * i + 1] * image_size + 0.5f)),
-            .ymin  = std::max(0, static_cast<int>(bboxes[4 * i]     * image_size + 0.5f)),
-            .xmax  = std::max(0, static_cast<int>(bboxes[4 * i + 3] * image_size + 0.5f)),
-            .ymax  = std::max(0, static_cast<int>(bboxes[4 * i + 2] * image_size + 0.5f)),
-            .score = scores[i] * 100 + 0.5f
+            .xmin  = std::max(0.0f, std::round(bboxes[4 * i + 1] * image_size)),
+            .ymin  = std::max(0.0f, std::round(bboxes[4 * i]     * image_size)),
+            .xmax  = std::max(0.0f, std::round(bboxes[4 * i + 3] * image_size)),
+            .ymax  = std::max(0.0f, std::round(bboxes[4 * i + 2] * image_size)),
+            .score = std::round(scores[i] * 100),
+            .type  = 0
         };
         tmp_results.push_back(bbox);
     }
 
-    // nothing to sort with single result
-    if (tmp_results.size() <= 1)
-        return tmp_results;
+    //nothing valid detected
+    if (!tmp_results.size()) {
+        results->clear();
+        if (consec_unmasked > 0)
+            consec_unmasked--;
+        return 0;
+    }
+
+    //single object detected
+    if (tmp_results.size() == 1) {
+        //change type if unmasked
+        if (!isBBoxMasked(tmp_results[0], config.mask, config.mask_size, image_size, config.mask_thresh)) {
+            if (consec_unmasked < 5)
+                consec_unmasked++;
+            tmp_results[0].type = consec_unmasked < 3 ? 1 : 2;
+        }
+        //decrease if masked
+        else if (consec_unmasked > 0)
+            consec_unmasked--;
+        *results = tmp_results;
+        return tmp_results[0].type + 1; //0, 1, 2 -> 1, 2, 3 | detected, unmasked, 3/5 unmasked
+    }
 
     // order indices to the tmp_results from highest to lowest scores
     std::vector<int> indices(tmp_results.size());
@@ -494,6 +479,8 @@ std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, const imag
         return tmp_results[lhs].score > tmp_results[rhs].score;
     });
 
+    int det_result = 1;
+    bool once = false;
     while (!indices.empty()) {
         int idx = indices.front();
         indices.erase(indices.begin());
@@ -504,150 +491,110 @@ std::vector<bbox_t> getResults(tflite::MicroInterpreter *interpreter, const imag
         // go through remaining box and check if there are any that overlap with the current box and have lower score
         for (auto it = indices.begin(); it != indices.end(); ) {
             //remove index to box that is overlapped or move to next one if not overlapped
-            if (IoU(current_box, tmp_results[*it]) > iou_threshold)
+            if (IoU(current_box, tmp_results[*it]) > iou_thresh)
                 it = indices.erase(it);
             else
                 it++;
         }
 
-        // ignore boxes with not enough change
-        if (hasChangedAverage(image, last_image, image_size, current_box.xmin, current_box.ymin, current_box.xmax, current_box.ymax, fp_change, fp_count))
-            results.push_back(current_box);
-        else
-            printfM7("Probably false positive\n");
+        //TODO join haschange and ismasked to single function (single loop)
+        //ignore boxes with not enough change
+        if (!hasBBoxChanged(image, background, image_size, current_box, fp_change, fp_count)) {
+            printf("False positive\n");
+            continue;
+        }
+
+        //check if box is not masked and update consecutive detection counter and pick right type
+        if (!isBBoxMasked(current_box, config.mask, config.mask_size, image_size, config.mask_thresh)) {
+            //unmasked box -> increase conscutive detection (but only once, since it is per frame)
+            if (!once) {
+                once = true;
+                if (consec_unmasked < 5)
+                    consec_unmasked++;
+            }
+            current_box.type = consec_unmasked <= 3 ? 1 : 2;
+        }
+        results->push_back(current_box);
     }
 
-    //printfM7("Total results vs final: %d vs %d\n", tmp_results.size(), results.size());
-    return results;
+    //all boxes were masked -> decrease
+    if (!once && consec_unmasked > 0)
+        consec_unmasked--;
+
+    //something is detected, but it is masked for too many frames
+    if (!consec_unmasked)
+        return 1;
+    else
+        return consec_unmasked <= 3 ? 2 : 3;
 }
 
 
-//takes about 106-108ms
+//Main detect task
 static void detectTask(void *args) {
-    status = 0;
+    int ret;
+    int status = 0;
     int clean = 0;
-    int obj_cnt, ret;
-    float det_thresh, iou_thresh, fp_change, fp_count;
-    last_frame.resize(image.size(), 0);
-    auto detect_image = last_frame;
+    int bckg_upd_cnt = 0;
 
-    //TODO initial "calibration"
-    while (true) {
-        // get frame
-        if (xSemaphoreTake(image_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
-            ret = CameraTask::GetSingleton()->GetFrame({frame});
-            detect_image = image;
-            xSemaphoreGive(image_mux);
-        }
-        else {
-            printfM7("failed to acquire img mutex\n");
-            continue;
-        }
-        if (!ret) {
-            printfM7("Failed to get image from camera.\r\n");
-            setStatus(-1);
-            continue;
-        }
+    cfg_struct_t config = global_config;
+    image_vector_t current_image(image_size * image_size * 3);
+    image_vector_t background(image_size * image_size * 3);
+    bbox_vector_t results;
 
-        //copy image data to tensor
-        std::memcpy(tflite::GetTensorData<int8_t>(interpreter->input_tensor(0)), detect_image.data(), detect_image.size());
-
-        // run model
-        if (interpreter->Invoke() != kTfLiteOk) {
-            printfM7("Invoke failed\n");
-            setStatus(-2);
-            continue;
-        }
-
-        if (interpreter->outputs().size() != 4) {
-            printfM7("Output size mismatch\\n");
-            setStatus(-3);
-            continue ;
-        }
-
-
-        // get results and remove anything that is not a person
-        if (xSemaphoreTake(config_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
-            det_thresh = config.det_thresh / 100.0f;
-            iou_thresh = config.iou_thresh / 100.0f;
-            fp_change = config.fp_change   / 100.0f;
-            fp_count = config.fp_count     / 100.0f;
-            xSemaphoreGive(config_mux);
-        }
-        else {
-            printfM7("failed to acquire config mutex\n");
-            setStatus(-5);
-            continue;
-        }
-
-        obj_cnt = 0;
-        if (xSemaphoreTake(result_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
-            results = getResults(interpreter, detect_image, last_frame, image_size, det_thresh, iou_thresh, fp_change, fp_count);
-            obj_cnt = results.size();
-            xSemaphoreGive(result_mux);
-            printfM7("%d objects\n", obj_cnt);
-        }
-        else {
-            printfM7("failed to acquire res mutex\n");
-            setStatus(-4);
-            continue;
-        }
-
-        detected ? clean = 0 : clean++;
-
-        if (!detected && clean >= 10) {
-            if (xSemaphoreTake(image_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
-                last_frame = image;
-                xSemaphoreGive(image_mux);
-            }
-            else {
-                printfM7("failed to acquire img mutex\n");
-                setStatus(-5);
-                continue;
-            }
-            printfM7("Last frame updated\n");
-        }
-
-        //printfM7("%d person objects\n", obj_cnt);
-        if (xSemaphoreTake(status_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
-            status = obj_cnt;
-            xSemaphoreGive(status_mux);
-        }
-        else
-            printfM7("failed to acquire det mutex\n");
-    }
-}
-
-void setup() {
-    status_mux = xSemaphoreCreateMutex();
-    image_mux  = xSemaphoreCreateMutex();
-    result_mux = xSemaphoreCreateMutex();
-    config_mux = xSemaphoreCreateMutex();
-
-    auto input_tensor = interpreter->input_tensor(0);
-    if (input_tensor->dims->data[1] != input_tensor->dims->data[2]) {
-        printfM7("Model input is not square. Exiting...\n");
-        vTaskDelete(NULL);
-    }
-    image_size  = input_tensor->dims->data[1];
-    printfM7("Input tensor size: %d %d\n", image_size, image_size);
-
-    // create and save image storages
-    image.resize(image_size * image_size * CameraFormatBpp(CameraFormat::kRgb), 0);
-    printfM7("%d\n", image.capacity());
-
-    // create frames for model and preview image
-    frame = CameraFrameFormat{
+    CameraFrameFormat frame = {
         CameraFormat::kRgb,
         CameraFilterMethod::kBilinear,
         CameraRotation::k270,
         image_size,
         image_size,
         true,
-        image.data(),
+        current_image.data(),
         true
     };
+
+    TickType_t last_wake_time;
+    const TickType_t frequency = 50;
+    while (true) {
+        vTaskDelayUntil(&last_wake_time, frequency);
+
+        //get image
+        ret = CameraTask::GetSingleton()->GetFrame({frame});
+        if (!ret) {
+            printf("Failed to get image from camera.\r\n");
+            status = -1;
+            continue;
+        }
+
+        std::memcpy(tflite::GetTensorData<uint8_t>(interpreter->input_tensor(0)), current_image.data(), current_image.size());
+
+        // run model
+        if (interpreter->Invoke() != kTfLiteOk) {
+            printf("Invoke failed\n");
+            status = -2;
+            continue;
+        }
+
+        if (update_config) {
+            xSemaphoreTake(config_mux, portMAX_DELAY);
+            config = global_config;
+            update_config = false;
+            xSemaphoreGive(config_mux);
+        }
+
+        int det_status = getResults(&results, interpreter, current_image, background, config);
+        bckg_upd_cnt = det_status ? 0 : bckg_upd_cnt + 1;
+
+        printf("Detection status: %d\n", det_status);
+
+        if (bckg_upd_cnt >= 10) {
+            background = current_image;
+            printf("Background updated\n");
+        }
+
+        result_queue.push({det_status, current_image, results}, portMAX_DELAY, true);
+    }
 }
+
 
 /*----(WEB HADNLING)----*/
 HttpServer::Content UriHandler(const char* uri) {
@@ -655,116 +602,75 @@ HttpServer::Content UriHandler(const char* uri) {
         return std::string(MAIN_WEB_PATH);
     
     else if (StrEndsWith(uri, STREAM_WEB_PATH)) {
-        image_vector_t img_copy;
-        if (xSemaphoreTake(image_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
-            img_copy = image;
-            xSemaphoreGive(image_mux);
+        //TODO wait for data to be in deque
+        web_task_msg_t results;
+
+        int ret = result_queue.pop(&results, 100, 100);
+        if (ret) {
+            printf("Failed to pop item from queue\n");
+            return {};
         }
-        else
-            printfM7("failed to get img mutex\n");
 
-        // get result copy
-        //std::vector<tensorflow::Object> res_copy;
-        std::vector<bbox_t> res_copy;
-        if (xSemaphoreTake(result_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
-            res_copy = results;
-            xSemaphoreGive(result_mux);
-        }
-        else
-            printfM7("failed to get res mutex\n");
-
-        int quality = DEFAULT_JPEG_QUALITY;
-        int mask_size = DEFAULT_MASK_SIZE;
-        std::vector<uint8_t> mask;
-        if (xSemaphoreTake(config_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
-            quality   = config.jpeg_quality;
-            mask      = config.mask;
-            mask_size = config.mask_size;
-            xSemaphoreGive(config_mux);
-        }
-        else
-            printfM7("failed to acquire config mutex\n");
-
-        //TODO move this to detector task
-        bool is_unmasked = false;
-        std::vector<bbox_t> final_result;
-        for (auto result : res_copy) {
-            int xmin = result.xmin;
-            int xmax = result.xmax;
-            int ymin = result.ymin;
-            int ymax = result.ymax;
-
-            int ticks = xTaskGetTickCount();
-            if (!isMasked(xmin, xmax, ymin, ymax, image_size, mask, mask_size)) {
-                is_unmasked = true;
-                final_result.push_back(result);
+        int quality = global_config.jpeg_quality;
+        
+        for (size_t i = 0; i < results.bboxes.size(); i++) {
+            switch (results.bboxes[i].type) {
+                case 0: drawRectangleFast(results.bboxes[i], &results.image, image_size, 0,     0, 255); break;
+                case 1: drawRectangleFast(results.bboxes[i], &results.image, image_size, 255, 255,   0); break;
+                case 2: drawRectangleFast(results.bboxes[i], &results.image, image_size, 0,   255,   0); break;
             }
-            else
-                drawRectangleFast(xmin, ymin, xmax, ymax, &img_copy, image_size, 0, 0, 255);
         }
-        detected_buf.pop_front();
-        detected_buf.push_back(is_unmasked);
-
-        int detect_cnt = 0;
-        for (auto was_detected : detected_buf)
-            detect_cnt += was_detected ? 1 : 0;
-
-        printfM7("%d %d\n", detect_cnt, detected_buf.size());
-
-        for (auto result : final_result) {
-            int xmin = result.xmin;
-            int xmax = result.xmax;
-            int ymin = result.ymin;
-            int ymax = result.ymax;
-
-            if (detect_cnt >= 3)
-                drawRectangleFast(xmin, ymin, xmax, ymax, &img_copy, image_size, 0, 255, 0);
-            else
-                drawRectangleFast(xmin, ymin, xmax, ymax, &img_copy, image_size, 255, 255, 0);
-        }
-
+        
+        //not raw jpeg. Last byte is detection status
         image_vector_t jpeg;
-        JpegCompressRgb(img_copy.data(), image_size, image_size, quality, &jpeg);
+        JpegCompressRgb(results.image.data(), image_size, image_size, quality, &jpeg);
+        jpeg.push_back(results.status);
         return jpeg;
     }
 
     else if (StrEndsWith(uri, CONFIG_LOAD_WEB_PATH)) {
-        std::string cfg_csv;
-        int ret = loadConfigFile(&cfg_csv);
-        if (ret) {
-            printfM7("Load failed\n");
-            return {};
-        }
-        return std::vector<uint8_t>(cfg_csv.begin(), cfg_csv.end());
+        xSemaphoreTake(config_mux, portMAX_DELAY);
+        std::string csv = csvFromConfig(global_config);
+        xSemaphoreGive(config_mux);
+        return std::vector<uint8_t>(csv.begin(), csv.end());
     }
+
     else if (StrEndsWith(uri, CONFIG_RESET_WEB_PATH)) {
-        cfg_struct_t default_config = buildDefaultConfig();
-        std::string cfg_csv = buildConfigCsv(default_config);
-        int ret = saveConfigFile(cfg_csv);
-        if (ret) {
-            printfM7("Failed to save default config\n");
-            return {};
+        xSemaphoreTake(config_mux, portMAX_DELAY);
+        update_config = true;
+        global_config = buildDefaultConfig();
+        std::string csv = csvFromConfig(global_config);
+        xSemaphoreGive(config_mux);
+        if (!writeConfigFile(csv)) {
+            printf("Failed to write reset config to file\n");
         }
-        return std::vector<uint8_t>(cfg_csv.begin(), cfg_csv.end());
+        return std::vector<uint8_t>(csv.begin(), csv.end());
     }
 
     return {};
 }
 
 std::string postUriHandler(std::string uri, std::vector<uint8_t> payload) {
-    printfM7("on post finished\r\n");
+    printf("on post finished\r\n");
 
     if (StrEndsWith(uri, CONFIG_SAVE_WEB_PATH)) {
-        int ret = saveConfigFile(std::string(payload.begin(), payload.end()));
-        if (ret) {
-            printfM7("Failed to save config: %d\n", ret);
-            return {};
+        std::string csv = std::string(payload.begin(), payload.end());
+
+        xSemaphoreTake(config_mux, portMAX_DELAY);
+        update_config = true;
+        if (!configFromCsv(csv, &global_config)) {
+            printf("Invalid CSV provided\n");
+        }
+        xSemaphoreGive(config_mux);
+
+        if (!writeConfigFile(csv)) {
+            printf("Failed to write csv to file\n");
         }
 
         return "/200.html";
     }
 
-    printfM7("unhandled uri: %s\n", uri.c_str());
+    printf("unhandled uri: %s\n", uri.c_str());
     return {};
 }
 
@@ -773,26 +679,39 @@ std::string postUriHandler(std::string uri, std::vector<uint8_t> payload) {
 extern "C" [[noreturn]] void app_main(void* param) {
     (void)param;
 
-    main_task_handle = xTaskGetCurrentTaskHandle();
+    config_mux = xSemaphoreCreateMutex();
 
     LedSet(Led::kStatus, true);
-    config = buildDefaultConfig();
+
+    //load config
+    std::string csv = readConfigFile();
+    //empty/non-existant file or malformed csv
+    if (!csv.size() || !configFromCsv(csv, &global_config)) {
+        global_config = buildDefaultConfig();
+        writeConfigFile(csvFromConfig(global_config));
+        printf("Config ");
+    }
+    else
+        printf("Config loaded from file\n");
+
 
     // Try and get an IP
-    std::optional<std::string> our_ip_addr;
-    printfM7("Attempting to use ethernet...\r\n");
-    CHECK(EthernetInit(true));
-    our_ip_addr = EthernetGetIp();
-
-    if (our_ip_addr.has_value()) {
-        printfM7("DHCP succeeded, our IP is %s.\r\n", our_ip_addr.value().c_str());
-    } else {
-        printfM7("We didn't get an IP via DHCP, not progressing further.\r\n");
-        return;
+    printf("Attempting to use ethernet...\r\n");
+    if (!EthernetInit(true)) {
+        //TODO run without ethernet?
+        printf("Failed to init ethernet\n");
+        exit();
+    }
+    auto ip_addr = EthernetGetIp();
+    if (ip_addr.has_value())
+        printf("DHCP succeeded, our IP is %s\n", ip_addr.value().c_str());
+    else {
+        printf("We didn't get an IP via DHCP, not progressing further.\r\n");
+        exit();
     }
 
 
-    tflite::MicroErrorReporter error_reporter;
+
     //Read the model and checks version.
     std::vector<uint8_t> model_raw;  //entire model is stored in this vector
     if (!LfsReadFile(MODEL_PATH, &model_raw)) {
@@ -800,14 +719,7 @@ extern "C" [[noreturn]] void app_main(void* param) {
         vTaskSuspend(nullptr);
     }
 
-
-    //Turn on the TPU and get it's context.
-    auto tpu_context = EdgeTpuManager::GetSingleton()->OpenDevice(PerformanceMode::kMax);
-    if (!tpu_context) {
-        TF_LITE_REPORT_ERROR(&error_reporter, "ERROR: Failed to get EdgeTpu context!");
-        vTaskSuspend(nullptr);
-    }
-
+    //confirm model scheme version
     auto* model = tflite::GetModel(model_raw.data());
     if (model->version() != TFLITE_SCHEMA_VERSION) {
         TF_LITE_REPORT_ERROR(&error_reporter, "Model schema version is %d, supported is %d", model->version(), TFLITE_SCHEMA_VERSION);
@@ -825,35 +737,36 @@ extern "C" [[noreturn]] void app_main(void* param) {
     }
 
     if (interpreter->inputs().size() != 1) {
-        printfM7("ERROR: Model must have only one input tensor\r\n");
+        printf("ERROR: Model must have only one input tensor\n");
+        exit();
+    }
+
+    auto input_tensor = interpreter->input_tensor(0);
+    if (input_tensor->dims->data[1] != input_tensor->dims->data[2]) {
+        printf("Model input is not square\n");
+        exit();
+    }
+
+    if (interpreter->outputs().size() != 4) {
+        printf("Output size mismatch\\n");
+        exit();
+    }
+
+    //Turn on the TPU and get it's context.
+    auto tpu_context = EdgeTpuManager::GetSingleton()->OpenDevice(PerformanceMode::kMax);
+    if (!tpu_context) {
+        TF_LITE_REPORT_ERROR(&error_reporter, "ERROR: Failed to get EdgeTpu context!");
         vTaskSuspend(nullptr);
     }
 
-
+    //start camera
     CameraTask::GetSingleton()->SetPower(true);
     CameraTask::GetSingleton()->Enable(CameraMode::kStreaming);
 
-    setup();
-
-    std::string cfg;
-    int ret = loadConfigFile(&cfg);
-    if (ret) {
-        printfM7("Failed to load config: %d\n", ret);
-        vTaskDelete(NULL);
-    }
-    printfM7("Config loaded\n");
-
-    //start M4
-    IpcM7::GetSingleton()->RegisterAppMessageHandler(HandleM4Message);
-    IpcM7::GetSingleton()->StartM4();
-    CHECK(IpcM7::GetSingleton()->M4IsAlive(500));
-
-
-    //notifyM4(IpcMsgType::CONFIG, IpcMsgGate::OTHER, image_size, &image_before, &image_after, &jpeg, &bboxes);
-    //ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    //printfM7("M4 got config\n");
-
+    //start detection task
     xTaskCreate(detectTask, "detect", 8192, nullptr, 0, &detect_task_handle);
+
+    //start http server
     PostHttpServer http_server;
     http_server.registerPostUriHandler(postUriHandler);
     http_server.AddUriHandler(UriHandler);

@@ -4,6 +4,7 @@
 #include <variant>
 #include <stdint.h>
 
+
 typedef std::vector<uint8_t> image_vector_t;
 
 typedef struct {
@@ -19,6 +20,7 @@ typedef std::vector<bbox_t> bbox_vector_t;
 
 typedef struct{
     int mask_size;
+    int mask_thresh;
     std::vector<uint8_t> mask;
     int rotation;
     int det_thresh;
@@ -27,3 +29,9 @@ typedef struct{
     int fp_count;
     int jpeg_quality;
 } cfg_struct_t;
+
+typedef struct {
+    int status;
+    image_vector_t image;
+    bbox_vector_t bboxes;
+} web_task_msg_t;
