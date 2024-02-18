@@ -112,8 +112,10 @@
     </div>
 
     <div class="config-group">
-      <label for="grid-size">Grid size:</label>
-      <input type="number" id="grid-size" name="grid-size" size="3" maxlength="3" min="2" max="320">
+      <label for="mask-size">Mask size:</label>
+      <input type="number" id="mask-size" name="mask-size" size="3" maxlength="3" min="2" max="320">
+      <label for="mask-thresh">Mask threshold:</label>
+      <input type="number" id="mask-thresh" name="mask-thresh" size="3" maxlength="3" min="0" max="100">
       <button id="toggleMaskBtn" onclick="toggleMask()">Toggle mask</button>
       <button id="resetMaskBtn" onclick="resetMask()">Reset mask</button>
     </div>
@@ -158,6 +160,11 @@
       <button id="loadFromFileBtn" onclick="document.getElementById('file-input').click()">Upload configuration</button>
     </div>
 
+    <div class="config-group">
+      <label for="status-field">Status:</label>
+      <input type="number" id="status-field" name="status-field" size="1" maxlength="1" disabled>
+    </div>
+
   </div>
 
 
@@ -166,10 +173,11 @@
     const configSaveUrl = "/config_save"; //get set
     const configLoadUrl = "/config_load"; //get set
     const configResetUrl = "/config_reset";
-    const statusUrl = "/status";
+    const statusUrl = "/detection_status";
 
     var previewSize = 500;
     var maskSize = 32; //current mask size (cell count per dimension)
+    var maskThresh = 50;
     var rotation = 270;
     var detThresh = 50;
     var iouThresh = 50;
@@ -192,7 +200,8 @@
 
     // start everything important on load
     function start() {
-      document.getElementById("grid-size").value = maskSize;
+      document.getElementById("mask-size").value = maskSize;
+      document.getElementById("mask-thresh").value = maskThresh;
       document.getElementById("image-rotation").value = rotation;
       document.getElementById("det-thresh").value = detThresh;
       document.getElementById("iou-thresh").value = iouThresh;
@@ -251,22 +260,24 @@
       if (values.length != 8)
         throw Error("Invalid csv length of ", values.length);
       maskSize = values[0];
-      rotation = values[2];
-      detThresh = values[3];
-      iouThresh = values[4];
-      fpChange = values[5];
-      fpCount = values[6];
-      jpegQuality = values[7];
+      maskThresh = values[1];
       for (var i = 0; i < maskSize; i++) {
         for (var ii = 0; ii < maskSize; ii++) {
-          mask.val[i][ii] = Number(values[1][i * maskSize + ii]);
+          mask.val[i][ii] = Number(values[2][i * maskSize + ii]);
           toggleDir = mask.val[i][ii];
           toggleCell(i, ii);
         }
       }
+      rotation = values[3];
+      detThresh = values[4];
+      iouThresh = values[5];
+      fpChange = values[6];
+      fpCount = values[7];
+      jpegQuality = values[8];
 
+      document.getElementById("mask-size").value = maskSize;
+      document.getElementById("mask-thresh").value = maskThresh;
       document.getElementById("image-rotation").value = rotation;
-      document.getElementById("grid-size").value = maskSize;
       document.getElementById("det-thresh").value = detThresh;
       document.getElementById("iou-thresh").value = iouThresh;
       document.getElementById("fp-change").value = fpChange;
@@ -291,6 +302,7 @@
         })
       })
       var csv = maskSize.toString() + ",";
+      casv += maskThresh.toString() + ",";
       csv += maskVal + ",";
       csv += rotation.toString() + ",";
       csv += detThresh.toString() + ",";
@@ -302,8 +314,9 @@
     }
 
     function saveConfig() {
+      maskSize = document.getElementById("mask-size").value;
+      maskThresh = document.getElementById("mask-thresh").value;
       rotation = document.getElementById("image-rotation").value;
-      maskSize = document.getElementById("grid-size").value;
       detThresh = document.getElementById("det-thresh").value;
       iouThresh = document.getElementById("iou-thresh").value;
       fpChange = document.getElementById("fp-change").value;
@@ -427,18 +440,33 @@
     async function updatePreview() {
       while (1) {
         try {
-          let imageBlob = await fetch(imgUrl).then(resp => resp.blob());
-          let imgElt = document.getElementById("stream");
+          // Fetch the binary data as an ArrayBuffer
+          let arrayBuffer = await fetch(imgUrl).then(resp => resp.arrayBuffer());
+
+          // Directly slice the ArrayBuffer to get the JPEG data (all but the last byte)
+          let jpegBuffer = arrayBuffer.slice(0, arrayBuffer.byteLength - 1);
+
+          // Convert the sliced buffer back to a Blob for the image
+          let imageBlob = new Blob([jpegBuffer], { type: 'image/jpeg' });
+
+          let imgElem = document.getElementById("stream");
 
           // Revoke the previous object URL to avoid memory leaks
-          if (imgElt.src.startsWith('blob:'))
-            URL.revokeObjectURL(imgElt.src);
+          if (imgElem.src.startsWith('blob:'))
+            URL.revokeObjectURL(imgElem.src);
 
-          imgElt.src = URL.createObjectURL(imageBlob);
-          imgElt.width = previewSize;//document.getElementById("image-width").value;
-          imgElt.height = previewSize;//document.getElementById("image-height").value;
-          //let rotation  = document.getElementById("image-rotation").value;
-          //imgElt.style.transform = 'rotate(' + rotation.toString() + 'deg)';
+          imgElem.src = URL.createObjectURL(imageBlob);
+          imgElem.width = previewSize;
+          imgElem.height = previewSize;
+
+          // Extract the last byte directly from the ArrayBuffer
+          let extraByteView = new DataView(arrayBuffer);
+          // Get the last byte as a signed 8-bit integer
+          let extraByteSigned = extraByteView.getInt8(arrayBuffer.byteLength - 1);
+
+          // Use `extraByteSigned` as needed
+          console.log("Extra data (signed int):", extraByteSigned);
+          document.getElementById("status-field").value = extraByteSigned;
         } catch (reason) {
           console.error("Error while fetching image: " + reason.toString());
         }

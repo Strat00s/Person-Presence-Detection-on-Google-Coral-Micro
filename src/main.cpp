@@ -1,22 +1,10 @@
-//TODO mark detected after 3 out of 5 consecutive frames
-//TODO move it to detector
-//TODO final structure:
-//bbox
-//score
-//type of detection (false positive, masked, unmasked but not yet full, full)
-
-//TODO threadsafe deque or vector
-
 //TODO move drawing into web page?
 //Send image (jpeg?) with bboxes
-
-//TODO move stuff to own classes
 
 //TODO output to pin
 //TODO output on LED
 //TODO output to uri
 
-//TODO remove useless data copying (if reference can be used)
 
 //TODO fix isCovered
 
@@ -29,7 +17,7 @@
 
 //TODO configurable grid size
 //TODO rotation
-//TODO status update to webpage
+
 
 #include <cstdio>
 #include <vector>
@@ -71,11 +59,14 @@ using namespace coralmicro;
 using namespace std;
 
 
-#define MAIN_WEB_PATH         "/page.html"
-#define STREAM_WEB_PATH       "/camera_stream"
-#define CONFIG_SAVE_WEB_PATH  "/config_save"
-#define CONFIG_LOAD_WEB_PATH  "/config_load"
-#define CONFIG_RESET_WEB_PATH "/config_reset"
+#define MAIN_WEB_PATH             "/page.html"
+#define STREAM_WEB_PATH           "/camera_stream"
+#define DETECTION_STATUS_WEB_PATH "/detection_status"
+#define CONFIG_SAVE_WEB_PATH      "/config_save"
+#define CONFIG_LOAD_WEB_PATH      "/config_load"
+#define CONFIG_RESET_WEB_PATH     "/config_reset"
+
+
 #define MODEL_PATH            "/model.tflite"
 #define CONFIG_PATH           "/cfg.csv"
 
@@ -135,7 +126,7 @@ cfg_struct_t buildDefaultConfig() {
  * @return true on success, false on invalid csv (csv has less tha 8 fields)
  */
 bool configFromCsv(const std::string &csv, cfg_struct_t *config) {
-    if (std::count(csv.begin(), csv.end(), ',') < 7) {
+    if (std::count(csv.begin(), csv.end(), ',') < 8) {
         printf("invalid csv\n");
         return false;
     }
@@ -168,7 +159,7 @@ bool configFromCsv(const std::string &csv, cfg_struct_t *config) {
         }
 
         //mask field
-        if (field_num == 1) {
+        if (field_num == 2) {
             new_config.mask.clear();
             new_config.mask.reserve(field_val.size());
             for (size_t i = 0; i < field_val.size(); i++)
@@ -190,14 +181,13 @@ bool configFromCsv(const std::string &csv, cfg_struct_t *config) {
         //everything but mask
         switch (field_num) {
             case 0: new_config.mask_size    = val; break;
-            //case 1: new_config.mask_thresh    = val; break;
-            //move all by one
-            case 2: new_config.rotation     = val; break;
-            case 3: new_config.det_thresh   = val; break;
-            case 4: new_config.iou_thresh   = val; break;
-            case 5: new_config.fp_change    = val; break;
-            case 6: new_config.fp_count     = val; break;
-            case 7: new_config.jpeg_quality = val; break;
+            case 1: new_config.mask_thresh  = val; break;
+            case 3: new_config.rotation     = val; break;
+            case 4: new_config.det_thresh   = val; break;
+            case 5: new_config.iou_thresh   = val; break;
+            case 6: new_config.fp_change    = val; break;
+            case 7: new_config.fp_count     = val; break;
+            case 8: new_config.jpeg_quality = val; break;
             default: printf("Unhandled field %d: %s\n", field_num, field_val.c_str()); break;
         }
     }
@@ -216,7 +206,7 @@ bool configFromCsv(const std::string &csv, cfg_struct_t *config) {
  */
 std::string csvFromConfig(const cfg_struct_t &config) {
     std::string csv = std::to_string(config.mask_size) + ',';
-    //std::string cfg = std::to_string(config.mask_thresh) + ',';
+    std::string cfg = std::to_string(config.mask_thresh) + ',';
     for (auto val: config.mask)
         csv += std::to_string(val);
     csv += ',';
@@ -604,15 +594,12 @@ HttpServer::Content UriHandler(const char* uri) {
     else if (StrEndsWith(uri, STREAM_WEB_PATH)) {
         //TODO wait for data to be in deque
         web_task_msg_t results;
-
         int ret = result_queue.pop(&results, 100, 100);
         if (ret) {
             printf("Failed to pop item from queue\n");
             return {};
         }
 
-        int quality = global_config.jpeg_quality;
-        
         for (size_t i = 0; i < results.bboxes.size(); i++) {
             switch (results.bboxes[i].type) {
                 case 0: drawRectangleFast(results.bboxes[i], &results.image, image_size, 0,     0, 255); break;
@@ -623,9 +610,21 @@ HttpServer::Content UriHandler(const char* uri) {
         
         //not raw jpeg. Last byte is detection status
         image_vector_t jpeg;
-        JpegCompressRgb(results.image.data(), image_size, image_size, quality, &jpeg);
+        JpegCompressRgb(results.image.data(), image_size, image_size, global_config.jpeg_quality, &jpeg);
         jpeg.push_back(results.status);
         return jpeg;
+    }
+
+    else if (StrEndsWith(uri, DETECTION_STATUS_WEB_PATH)) {
+        web_task_msg_t results;
+        int ret = result_queue.pop(&results, 100, 100);
+        if (ret) {
+            printf("Failed to pop item from queue\n");
+            return {};
+        }
+        std::vector<uint8_t> status;
+        status.push_back(results.status);
+        return status;
     }
 
     else if (StrEndsWith(uri, CONFIG_LOAD_WEB_PATH)) {
@@ -637,9 +636,9 @@ HttpServer::Content UriHandler(const char* uri) {
 
     else if (StrEndsWith(uri, CONFIG_RESET_WEB_PATH)) {
         xSemaphoreTake(config_mux, portMAX_DELAY);
-        update_config = true;
         global_config = buildDefaultConfig();
         std::string csv = csvFromConfig(global_config);
+        update_config = true;
         xSemaphoreGive(config_mux);
         if (!writeConfigFile(csv)) {
             printf("Failed to write reset config to file\n");
@@ -657,10 +656,10 @@ std::string postUriHandler(std::string uri, std::vector<uint8_t> payload) {
         std::string csv = std::string(payload.begin(), payload.end());
 
         xSemaphoreTake(config_mux, portMAX_DELAY);
-        update_config = true;
         if (!configFromCsv(csv, &global_config)) {
             printf("Invalid CSV provided\n");
         }
+        update_config = true;
         xSemaphoreGive(config_mux);
 
         if (!writeConfigFile(csv)) {
