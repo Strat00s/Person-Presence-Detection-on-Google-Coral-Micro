@@ -4,6 +4,7 @@
 //TODO output on LED
 //TODO output to uri
 
+//TODO mask threshold wording
 
 //TODO configurable grid size
 //TODO rotation
@@ -300,8 +301,8 @@ bool isBBoxMasked(bbox_t bbox, const image_vector_t& mask, int mask_size, int im
     // Scale factor from the image size to grid size.
     const int scale = image_size / mask_size;
 
-    int coveredCells = 0;
-    int totalCells = 0;
+    int covered_cells = 0;
+    int total_cells = 0;
 
     // Iterate over the box's range.
     for (int y = bbox.ymin; y <= bbox.ymax; y++) {
@@ -316,18 +317,13 @@ bool isBBoxMasked(bbox_t bbox, const image_vector_t& mask, int mask_size, int im
                 int index = gridY * mask_size + gridX;
 
                 // Check if the cell is non-toggled
-                coveredCells += mask[index];
-                totalCells++;
+                covered_cells += mask[index];
+                total_cells++;
             }
         }
     }
 
-    //printf("%d %d %d %d\n", coveredCells, totalCells, mask_size, mask.size());
-
-    //TODO fix
-    //TODO threshold
-    // Check if at least half of the box is covered by non-toggled cells.
-    return coveredCells > totalCells / 2;
+    return covered_cells > total_cells * (1.0f - threshold);
 }
 
 
@@ -386,18 +382,19 @@ float IoU(const bbox_t& a, const bbox_t& b) {
  * @param config current config
  * @return 0 if nothing is detected.
  * 1 if something is detected and masked.
- * 2 if something is/was detected and unmasked (consecutive counter must reach 0 to go from 2 to 1 or 0)
- * 3 if something is detected, unmasked and 3/5 consecutive detection.
+ * 2 if something is/was detected and is/was unmasked in last 5 frames.
+ * 3 if something is detected, is unmasked and is detected in the last 3 out of 5 frames.
  */
 int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpreter, const image_vector_t &image,
                                                     const image_vector_t &background, const cfg_struct_t &config) {
 
     static int consec_unmasked = 0; //keeps count of consecutive unmasked detections
 
-    float det_thresh = config.det_thresh / 100.0f;
-    float iou_thresh = config.iou_thresh / 100.0f;
-    float fp_change  = config.fp_change  / 100.0f;
-    float fp_count   = config.fp_count   / 100.0f;
+    float det_thresh  = config.det_thresh / 100.0f;
+    float iou_thresh  = config.iou_thresh / 100.0f;
+    float fp_change   = config.fp_change  / 100.0f;
+    float fp_count    = config.fp_count   / 100.0f;
+    float mask_thresh = config.mask_thresh / 100.0f;
     //get data from output tensor
     float *bboxes, *ids, *scores, *count;
     if (interpreter->output_tensor(2)->dims->size == 1) {
@@ -447,16 +444,18 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
     //single object detected
     if (tmp_results.size() == 1) {
         //change type if unmasked
-        if (!isBBoxMasked(tmp_results[0], config.mask, config.mask_size, image_size, config.mask_thresh)) {
+        if (!isBBoxMasked(tmp_results[0], config.mask, config.mask_size, image_size, mask_thresh)) {
             if (consec_unmasked < 5)
                 consec_unmasked++;
             tmp_results[0].type = consec_unmasked < 3 ? 1 : 2;
+            *results = tmp_results;
+            return consec_unmasked < 3 ? 2 : 3;
         }
         //decrease if masked
-        else if (consec_unmasked > 0)
+        if (consec_unmasked > 0)
             consec_unmasked--;
         *results = tmp_results;
-        return tmp_results[0].type + 1; //0, 1, 2 -> 1, 2, 3 | detected, unmasked, 3/5 unmasked
+        return consec_unmasked > 0 ? 2 : 1;
     }
 
     // order indices to the tmp_results from highest to lowest scores
@@ -491,7 +490,7 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
         }
 
         //check if box is not masked and update consecutive detection counter and pick right type
-        if (!isBBoxMasked(current_box, config.mask, config.mask_size, image_size, config.mask_thresh)) {
+        if (!isBBoxMasked(current_box, config.mask, config.mask_size, image_size, mask_thresh)) {
             //unmasked box -> increase conscutive detection (but only once, since it is per frame)
             if (!once) {
                 once = true;
@@ -511,7 +510,8 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
     if (!consec_unmasked)
         return 1;
     else
-        return consec_unmasked <= 3 ? 2 : 3;
+        return consec_unmasked > 0 ? 2 : 0;
+        //return consec_unmasked <= 3 ? 2 : 3;
 }
 
 
@@ -543,8 +543,8 @@ static void detectTask(void *args) {
     while (true) {
         vTaskDelayUntil(&last_wake_time, frequency);
 
-        int ticks = xTaskGetTickCount();
         //get image
+        CameraTask::GetSingleton()->DiscardFrames(1);
         ret = CameraTask::GetSingleton()->GetFrame({frame});
         if (!ret) {
             printf("Failed to get image from camera.\r\n");
@@ -552,6 +552,7 @@ static void detectTask(void *args) {
             continue;
         }
 
+        //slow because data copying
         std::memcpy(tflite::GetTensorData<uint8_t>(interpreter->input_tensor(0)), current_image.data(), current_image.size());
 
         // run model
@@ -579,8 +580,8 @@ static void detectTask(void *args) {
             printf("Background updated\n");
         }
 
+        //slow because data copying
         result_queue.push({det_status, current_image, results}, portMAX_DELAY, true);
-        printf("total time: %dms\n", xTaskGetTickCount() - ticks);
     }
 }
 
@@ -591,7 +592,7 @@ HttpServer::Content UriHandler(const char* uri) {
         return std::string(MAIN_WEB_PATH);
     
     else if (StrEndsWith(uri, STREAM_WEB_PATH)) {
-        //TODO wait for data to be in deque
+        //TODO wait for inference to be done
         web_task_msg_t results;
         int ret = result_queue.pop(&results, 100, 100);
         if (ret) {
@@ -599,6 +600,7 @@ HttpServer::Content UriHandler(const char* uri) {
             return {};
         }
 
+        int ticks = xTaskGetTickCount();
         for (size_t i = 0; i < results.bboxes.size(); i++) {
             switch (results.bboxes[i].type) {
                 case 0: drawRectangleFast(results.bboxes[i], &results.image, image_size, 0,     0, 255); break;
@@ -606,7 +608,7 @@ HttpServer::Content UriHandler(const char* uri) {
                 case 2: drawRectangleFast(results.bboxes[i], &results.image, image_size, 0,   255,   0); break;
             }
         }
-        
+        printf("Draw time: %dms\n", xTaskGetTickCount() - ticks);
         //not raw jpeg. Last byte is detection status
         image_vector_t jpeg;
         JpegCompressRgb(results.image.data(), image_size, image_size, global_config.jpeg_quality, &jpeg);
@@ -682,6 +684,8 @@ extern "C" [[noreturn]] void app_main(void* param) {
     LedSet(Led::kStatus, true);
 
     vTaskDelay(5000);
+    
+    coralmicro::
 
     //load config
     std::string csv = readConfigFile();
@@ -764,11 +768,13 @@ extern "C" [[noreturn]] void app_main(void* param) {
     }
 
     //start camera
+    CameraTask::GetSingleton()->SetPower(false);
+    vTaskDelay(100);
     CameraTask::GetSingleton()->SetPower(true);
     CameraTask::GetSingleton()->Enable(CameraMode::kStreaming);
 
     //start detection task
-    xTaskCreate(detectTask, "detect", 8192, nullptr, 0, &detect_task_handle);
+    xTaskCreate(detectTask, "detect", 16000, nullptr, 4, &detect_task_handle);
 
     //start http server
     PostHttpServer http_server;
