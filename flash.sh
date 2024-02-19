@@ -1,1 +1,0 @@
-python3 coralmicro/scripts/flashtool.py --app $1

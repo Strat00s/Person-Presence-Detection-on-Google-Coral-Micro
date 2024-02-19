@@ -257,7 +257,7 @@
     }
 
     function updateDocument(values) {
-      if (values.length != 8)
+      if (values.length < 9)
         throw Error("Invalid csv length of ", values.length);
       maskSize = values[0];
       maskThresh = values[1];
@@ -302,7 +302,7 @@
         })
       })
       var csv = maskSize.toString() + ",";
-      casv += maskThresh.toString() + ",";
+      csv += maskThresh.toString() + ",";
       csv += maskVal + ",";
       csv += rotation.toString() + ",";
       csv += detThresh.toString() + ",";

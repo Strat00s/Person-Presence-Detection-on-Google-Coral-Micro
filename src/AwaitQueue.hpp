@@ -30,11 +30,11 @@ public:
      */
     int pop(T *item, TickType_t await_timeout = portMAX_DELAY, TickType_t access_timeout = portMAX_DELAY) {
         //wait for data
-        if (xSemaphoreTake(await_sem, await_timeout) != pd0)
+        if (xSemaphoreTake(await_sem, await_timeout) != pdTRUE)
             return 1;
         
         //try and access the data
-        if (xSemaphoreTake(buf_mux, access_timeout) != pd0) {
+        if (xSemaphoreTake(buf_mux, access_timeout) != pdTRUE) {
             xSemaphoreGive(await_sem);
             return 1;
         }
@@ -59,7 +59,7 @@ public:
      * @return 0 on success, 1 otherwise
      */
     int push(T item, TickType_t timeout = portMAX_DELAY, bool replace = 1) {
-        if (xSemaphoreTake(buf_mux, timeout) != pd0)
+        if (xSemaphoreTake(buf_mux, timeout) != pdTRUE)
             return 1;
         
         //don't add any items if full
@@ -83,7 +83,7 @@ public:
      * @return 0 on success, 1 otherwise
      */
     int size(size_t *size, TickType_t timeout = portMAX_DELAY){
-        if (xSemaphoreTake(buf_mux, timeout) != pd0)
+        if (xSemaphoreTake(buf_mux, timeout) != pdTRUE)
             return 1;
 
         *size = buffer.size();

@@ -1,19 +1,9 @@
 //TODO move drawing into web page?
-//Send image (jpeg?) with bboxes
 
 //TODO output to pin
 //TODO output on LED
 //TODO output to uri
 
-
-//TODO fix isCovered
-
-//TODO has changed average -> better calculcations
-
-//TODO watchdog ?
-
-//TODO detect brightness change
-//if big enough, update current last frame even if something is detected (update only parts with not detections)
 
 //TODO configurable grid size
 //TODO rotation
@@ -26,6 +16,8 @@
 #include <numeric>
 #include <deque>
 #include <cstdarg>
+#include <cstdlib>
+#include <cerrno>
 
 #include "libs/base/http_server.h"
 #include "libs/base/led.h"
@@ -169,11 +161,10 @@ bool configFromCsv(const std::string &csv, cfg_struct_t *config) {
 
         //try to convert the field to number
         int val = 0;
-        try {
-            val = std::stoi(field_val);
-        }
-        catch(const std::exception& e) {
-            printf("%s\n", e.what());
+        char *endptr;
+        val = std::strtol(field_val.c_str(), &endptr, 10);
+        if (*endptr) {
+            printf("Failed to convert %s to int\n", field_val.c_str());
             malformed = true;
             continue;
         }
@@ -206,7 +197,7 @@ bool configFromCsv(const std::string &csv, cfg_struct_t *config) {
  */
 std::string csvFromConfig(const cfg_struct_t &config) {
     std::string csv = std::to_string(config.mask_size) + ',';
-    std::string cfg = std::to_string(config.mask_thresh) + ',';
+    csv += std::to_string(config.mask_thresh) + ',';
     for (auto val: config.mask)
         csv += std::to_string(val);
     csv += ',';
@@ -225,6 +216,7 @@ std::string csvFromConfig(const cfg_struct_t &config) {
  * @return true on success, false otherwise
  */
 bool writeConfigFile(const std::string &csv) {
+    printf("Write config: %s\n", csv.c_str());
     return LfsWriteFile(CONFIG_PATH, csv);
 }
 
@@ -255,10 +247,10 @@ void drawRectangleFast(bbox_t bbox, image_vector_t *image, int image_size, uint8
         bbox.xmin = 0;
     if (bbox.ymin < 0)
         bbox.ymin = 0;
-    if (bbox.xmax > image_size)
-        bbox.xmax = image_size;
-    if (bbox.ymax > image_size)
-        bbox.ymax = image_size;
+    if (bbox.xmax > image_size - 1)
+        bbox.xmax = image_size - 1;
+    if (bbox.ymax > image_size - 1)
+        bbox.ymax = image_size - 1;
 
     //draw top and bottom sides
     int max_start = (bbox.ymax * image_size + bbox.xmin) * 3;
@@ -394,7 +386,7 @@ float IoU(const bbox_t& a, const bbox_t& b) {
  * @param config current config
  * @return 0 if nothing is detected.
  * 1 if something is detected and masked.
- * 2 if something detected and unmasked.
+ * 2 if something is/was detected and unmasked (consecutive counter must reach 0 to go from 2 to 1 or 0)
  * 3 if something is detected, unmasked and 3/5 consecutive detection.
  */
 int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpreter, const image_vector_t &image,
@@ -402,11 +394,11 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
 
     static int consec_unmasked = 0; //keeps count of consecutive unmasked detections
 
-    //get data from output tensor
     float det_thresh = config.det_thresh / 100.0f;
     float iou_thresh = config.iou_thresh / 100.0f;
     float fp_change  = config.fp_change  / 100.0f;
     float fp_count   = config.fp_count   / 100.0f;
+    //get data from output tensor
     float *bboxes, *ids, *scores, *count;
     if (interpreter->output_tensor(2)->dims->size == 1) {
         scores = tflite::GetTensorData<float>(interpreter->output_tensor(0));
@@ -421,11 +413,12 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
         count  = tflite::GetTensorData<float>(interpreter->output_tensor(3));
     }
 
-    std::vector<bbox_t> tmp_results;
+    bbox_vector_t tmp_results;
+    results->clear();
     size_t cnt = static_cast<int>(count[0]);
     for (int i = 0; i < cnt; ++i) {
         //skip object with id != 0 (not person) and below threshold
-        if (!std::round(ids[i]) || scores[i] < det_thresh)
+        if (std::round(ids[i]) || scores[i] < det_thresh)
             continue;
 
         bbox_t bbox = {
@@ -436,6 +429,10 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
             .score = std::round(scores[i] * 100),
             .type  = 0
         };
+        if (bbox.xmax >= image_size)
+            bbox.xmax = image_size - 1;
+        if (bbox.ymax >= image_size)
+            bbox.ymax = image_size - 1;
         tmp_results.push_back(bbox);
     }
 
@@ -444,7 +441,7 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
         results->clear();
         if (consec_unmasked > 0)
             consec_unmasked--;
-        return 0;
+        return consec_unmasked > 0 ? 2 : 0;
     }
 
     //single object detected
@@ -469,7 +466,6 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
         return tmp_results[lhs].score > tmp_results[rhs].score;
     });
 
-    int det_result = 1;
     bool once = false;
     while (!indices.empty()) {
         int idx = indices.front();
@@ -490,7 +486,7 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
         //TODO join haschange and ismasked to single function (single loop)
         //ignore boxes with not enough change
         if (!hasBBoxChanged(image, background, image_size, current_box, fp_change, fp_count)) {
-            printf("False positive\n");
+            //printf("False positive %d\n");
             continue;
         }
 
@@ -547,6 +543,7 @@ static void detectTask(void *args) {
     while (true) {
         vTaskDelayUntil(&last_wake_time, frequency);
 
+        int ticks = xTaskGetTickCount();
         //get image
         ret = CameraTask::GetSingleton()->GetFrame({frame});
         if (!ret) {
@@ -574,6 +571,7 @@ static void detectTask(void *args) {
         int det_status = getResults(&results, interpreter, current_image, background, config);
         bckg_upd_cnt = det_status ? 0 : bckg_upd_cnt + 1;
 
+        LedSet(Led::kUser, det_status > 1);
         printf("Detection status: %d\n", det_status);
 
         if (bckg_upd_cnt >= 10) {
@@ -582,6 +580,7 @@ static void detectTask(void *args) {
         }
 
         result_queue.push({det_status, current_image, results}, portMAX_DELAY, true);
+        printf("total time: %dms\n", xTaskGetTickCount() - ticks);
     }
 }
 
@@ -682,13 +681,19 @@ extern "C" [[noreturn]] void app_main(void* param) {
 
     LedSet(Led::kStatus, true);
 
+    vTaskDelay(5000);
+
     //load config
     std::string csv = readConfigFile();
+    printf("Read csv: %s\n", csv.c_str());
     //empty/non-existant file or malformed csv
     if (!csv.size() || !configFromCsv(csv, &global_config)) {
         global_config = buildDefaultConfig();
-        writeConfigFile(csvFromConfig(global_config));
-        printf("Config ");
+        if (writeConfigFile(csvFromConfig(global_config))) {
+            printf("Failed to write config file\n");
+            vTaskDelete(NULL);
+        }
+        printf("Config regenerated\n");
     }
     else
         printf("Config loaded from file\n");
