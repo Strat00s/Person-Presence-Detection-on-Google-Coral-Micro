@@ -1,8 +1,4 @@
-//TODO move drawing into web page?
-
 //TODO output to pin
-//TODO output on LED
-//TODO output to uri
 
 //TODO mask threshold wording
 
@@ -18,7 +14,6 @@
 #include <deque>
 #include <cstdarg>
 #include <cstdlib>
-#include <cerrno>
 
 #include "libs/base/http_server.h"
 #include "libs/base/led.h"
@@ -41,7 +36,9 @@
 #include "third_party/nxp/rt1176-sdk/middleware/lwip/src/include/lwip/dns.h"
 #include "third_party/nxp/rt1176-sdk/middleware/lwip/src/include/lwip/tcpip.h"
 #include "libs/base/check.h"
-//#include "x86_64-linux-gnu/sys/time.h"
+#include "libs/base/watchdog.h"
+#include "libs/base/reset.h"
+#include "libs/base/mutex.h"
 
 #include "local_libs/http_server.h"
 #include "structs.hpp"
@@ -50,6 +47,9 @@
 
 using namespace coralmicro;
 using namespace std;
+
+
+#define IMAGE_SIZE gl_image_size * gl_image_size * 3
 
 
 #define MAIN_WEB_PATH             "/page.html"
@@ -77,23 +77,28 @@ using namespace std;
 STATIC_TENSOR_ARENA_IN_SDRAM(tensor_arena, TENSOR_ARENA_SIZE);
 
 
-//int image_size   = DEFAULT_IMAGE_SIZE;
+/*----(TFLITE MICRO)----*/
 tflite::MicroMutableOpResolver<3> resolver;
 tflite::MicroInterpreter *interpreter; //must be created and configured in the main task for some reason
 tflite::MicroErrorReporter error_reporter;
 
-int image_size = DEFAULT_IMAGE_SIZE;
-cfg_struct_t global_config;
-bool update_config = true;
+/*----(SHARED GLOBAL VARIABLES)----*/
+int gl_status = 0;
+int gl_image_size = DEFAULT_IMAGE_SIZE;
+bool gl_update_config = true;
+cfg_struct_t gl_config;
+image_vector_t gl_image;
+bbox_vector_t gl_bboxes;
+
+/*----(FREERTOS)----*/
 SemaphoreHandle_t config_mux;
-
-TaskHandle_t detect_task_handle; // detector task handle
-
-AwaitQueue<web_task_msg_t> result_queue(2);
+SemaphoreHandle_t data_mux;
+TaskHandle_t detect_task_handle;
 
 
 void exit() {
     printf("Exiting...\n");
+    LedSet(Led::kStatus, false);
     vTaskSuspend(NULL);
 }
 
@@ -419,17 +424,17 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
             continue;
 
         bbox_t bbox = {
-            .xmin  = std::max(0.0f, std::round(bboxes[4 * i + 1] * image_size)),
-            .ymin  = std::max(0.0f, std::round(bboxes[4 * i]     * image_size)),
-            .xmax  = std::max(0.0f, std::round(bboxes[4 * i + 3] * image_size)),
-            .ymax  = std::max(0.0f, std::round(bboxes[4 * i + 2] * image_size)),
+            .xmin  = std::max(0.0f, std::round(bboxes[4 * i + 1] * gl_image_size)),
+            .ymin  = std::max(0.0f, std::round(bboxes[4 * i]     * gl_image_size)),
+            .xmax  = std::max(0.0f, std::round(bboxes[4 * i + 3] * gl_image_size)),
+            .ymax  = std::max(0.0f, std::round(bboxes[4 * i + 2] * gl_image_size)),
             .score = std::round(scores[i] * 100),
             .type  = 0
         };
-        if (bbox.xmax >= image_size)
-            bbox.xmax = image_size - 1;
-        if (bbox.ymax >= image_size)
-            bbox.ymax = image_size - 1;
+        if (bbox.xmax >= gl_image_size)
+            bbox.xmax = gl_image_size - 1;
+        if (bbox.ymax >= gl_image_size)
+            bbox.ymax = gl_image_size - 1;
         tmp_results.push_back(bbox);
     }
 
@@ -444,7 +449,7 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
     //single object detected
     if (tmp_results.size() == 1) {
         //change type if unmasked
-        if (!isBBoxMasked(tmp_results[0], config.mask, config.mask_size, image_size, mask_thresh)) {
+        if (!isBBoxMasked(tmp_results[0], config.mask, config.mask_size, gl_image_size, mask_thresh)) {
             if (consec_unmasked < 5)
                 consec_unmasked++;
             tmp_results[0].type = consec_unmasked < 3 ? 1 : 2;
@@ -484,13 +489,13 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
 
         //TODO join haschange and ismasked to single function (single loop)
         //ignore boxes with not enough change
-        if (!hasBBoxChanged(image, background, image_size, current_box, fp_change, fp_count)) {
+        if (!hasBBoxChanged(image, background, gl_image_size, current_box, fp_change, fp_count)) {
             //printf("False positive %d\n");
             continue;
         }
 
         //check if box is not masked and update consecutive detection counter and pick right type
-        if (!isBBoxMasked(current_box, config.mask, config.mask_size, image_size, mask_thresh)) {
+        if (!isBBoxMasked(current_box, config.mask, config.mask_size, gl_image_size, mask_thresh)) {
             //unmasked box -> increase conscutive detection (but only once, since it is per frame)
             if (!once) {
                 once = true;
@@ -518,23 +523,24 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
 //Main detect task
 static void detectTask(void *args) {
     int ret;
-    int status = 0;
     int clean = 0;
     int bckg_upd_cnt = 0;
 
-    cfg_struct_t config = global_config;
-    image_vector_t current_image(image_size * image_size * 3);
-    image_vector_t background(image_size * image_size * 3);
-    bbox_vector_t results;
+    gl_status = 0;
+    gl_image.resize(gl_image_size * gl_image_size * 3);
+
+    cfg_struct_t config = gl_config;
+    image_vector_t background(gl_image_size * gl_image_size * 3);
+    uint8_t *tensor_input = tflite::GetTensorData<uint8_t>(interpreter->input_tensor(0));
 
     CameraFrameFormat frame = {
         CameraFormat::kRgb,
         CameraFilterMethod::kBilinear,
         CameraRotation::k270,
-        image_size,
-        image_size,
+        gl_image_size,
+        gl_image_size,
         true,
-        current_image.data(),
+        tensor_input,
         true
     };
 
@@ -544,44 +550,47 @@ static void detectTask(void *args) {
         vTaskDelayUntil(&last_wake_time, frequency);
 
         //get image
+        int ticks = xTaskGetTickCount();
         CameraTask::GetSingleton()->DiscardFrames(1);
         ret = CameraTask::GetSingleton()->GetFrame({frame});
         if (!ret) {
             printf("Failed to get image from camera.\r\n");
-            status = -1;
+            gl_status = -1;
             continue;
         }
+        printf("Camera time: %d\n", xTaskGetTickCount() - ticks);
 
-        //slow because data copying
-        std::memcpy(tflite::GetTensorData<uint8_t>(interpreter->input_tensor(0)), current_image.data(), current_image.size());
-
+        ticks = xTaskGetTickCount();
         // run model
         if (interpreter->Invoke() != kTfLiteOk) {
             printf("Invoke failed\n");
-            status = -2;
+            gl_status = -2;
             continue;
         }
+        printf("inference time: %d\n", xTaskGetTickCount() - ticks);
 
-        if (update_config) {
+
+        if (gl_update_config) {
             xSemaphoreTake(config_mux, portMAX_DELAY);
-            config = global_config;
-            update_config = false;
+            config = gl_config;
+            gl_update_config = false;
             xSemaphoreGive(config_mux);
         }
 
-        int det_status = getResults(&results, interpreter, current_image, background, config);
-        bckg_upd_cnt = det_status ? 0 : bckg_upd_cnt + 1;
+        ticks = xTaskGetTickCount();
+        xSemaphoreTake(data_mux, portMAX_DELAY);
+        gl_image = image_vector_t(tensor_input, tensor_input + gl_image_size * gl_image_size * 3);
+        gl_status = getResults(&gl_bboxes, interpreter, gl_image, background, config);
+        xSemaphoreGive(data_mux);
 
-        LedSet(Led::kUser, det_status > 1);
-        printf("Detection status: %d\n", det_status);
+        bckg_upd_cnt = gl_status ? 0 : bckg_upd_cnt + 1;
+        LedSet(Led::kUser, gl_status > 1);
 
         if (bckg_upd_cnt >= 10) {
-            background = current_image;
+            background = gl_image;
             printf("Background updated\n");
         }
-
-        //slow because data copying
-        result_queue.push({det_status, current_image, results}, portMAX_DELAY, true);
+        printf("Result time: %d\n", xTaskGetTickCount() - ticks);
     }
 }
 
@@ -592,54 +601,41 @@ HttpServer::Content UriHandler(const char* uri) {
         return std::string(MAIN_WEB_PATH);
     
     else if (StrEndsWith(uri, STREAM_WEB_PATH)) {
-        //TODO wait for inference to be done
-        web_task_msg_t results;
-        int ret = result_queue.pop(&results, 100, 100);
-        if (ret) {
-            printf("Failed to pop item from queue\n");
-            return {};
-        }
-
-        int ticks = xTaskGetTickCount();
-        for (size_t i = 0; i < results.bboxes.size(); i++) {
-            switch (results.bboxes[i].type) {
-                case 0: drawRectangleFast(results.bboxes[i], &results.image, image_size, 0,     0, 255); break;
-                case 1: drawRectangleFast(results.bboxes[i], &results.image, image_size, 255, 255,   0); break;
-                case 2: drawRectangleFast(results.bboxes[i], &results.image, image_size, 0,   255,   0); break;
+        xSemaphoreTake(data_mux, portMAX_DELAY);
+        for (size_t i = 0; i < gl_bboxes.size(); i++) {
+            switch (gl_bboxes[i].type) {
+                case 0: drawRectangleFast(gl_bboxes[i], &gl_image, gl_image_size, 0,     0, 255); break;
+                case 1: drawRectangleFast(gl_bboxes[i], &gl_image, gl_image_size, 255, 255,   0); break;
+                case 2: drawRectangleFast(gl_bboxes[i], &gl_image, gl_image_size, 0,   255,   0); break;
             }
         }
-        printf("Draw time: %dms\n", xTaskGetTickCount() - ticks);
-        //not raw jpeg. Last byte is detection status
+
+         //not raw jpeg. Last byte is detection gl_status
         image_vector_t jpeg;
-        JpegCompressRgb(results.image.data(), image_size, image_size, global_config.jpeg_quality, &jpeg);
-        jpeg.push_back(results.status);
+        JpegCompressRgb(gl_image.data(), gl_image_size, gl_image_size, gl_config.jpeg_quality, &jpeg);
+        jpeg.push_back(gl_status);
+        xSemaphoreGive(data_mux);
         return jpeg;
     }
 
     else if (StrEndsWith(uri, DETECTION_STATUS_WEB_PATH)) {
-        web_task_msg_t results;
-        int ret = result_queue.pop(&results, 100, 100);
-        if (ret) {
-            printf("Failed to pop item from queue\n");
-            return {};
-        }
         std::vector<uint8_t> status;
-        status.push_back(results.status);
+        status.push_back(gl_status);
         return status;
     }
 
     else if (StrEndsWith(uri, CONFIG_LOAD_WEB_PATH)) {
         xSemaphoreTake(config_mux, portMAX_DELAY);
-        std::string csv = csvFromConfig(global_config);
+        std::string csv = csvFromConfig(gl_config);
         xSemaphoreGive(config_mux);
         return std::vector<uint8_t>(csv.begin(), csv.end());
     }
 
     else if (StrEndsWith(uri, CONFIG_RESET_WEB_PATH)) {
         xSemaphoreTake(config_mux, portMAX_DELAY);
-        global_config = buildDefaultConfig();
-        std::string csv = csvFromConfig(global_config);
-        update_config = true;
+        gl_config = buildDefaultConfig();
+        std::string csv = csvFromConfig(gl_config);
+        gl_update_config = true;
         xSemaphoreGive(config_mux);
         if (!writeConfigFile(csv)) {
             printf("Failed to write reset config to file\n");
@@ -657,10 +653,10 @@ std::string postUriHandler(std::string uri, std::vector<uint8_t> payload) {
         std::string csv = std::string(payload.begin(), payload.end());
 
         xSemaphoreTake(config_mux, portMAX_DELAY);
-        if (!configFromCsv(csv, &global_config)) {
+        if (!configFromCsv(csv, &gl_config)) {
             printf("Invalid CSV provided\n");
         }
-        update_config = true;
+        gl_update_config = true;
         xSemaphoreGive(config_mux);
 
         if (!writeConfigFile(csv)) {
@@ -680,22 +676,34 @@ extern "C" [[noreturn]] void app_main(void* param) {
     (void)param;
 
     config_mux = xSemaphoreCreateMutex();
+    data_mux = xSemaphoreCreateMutex();
 
     LedSet(Led::kStatus, true);
 
     vTaskDelay(5000);
-    
-    coralmicro::
+
+    auto reset_stats = ResetGetStats();
+    printf("Reset stats:\n");
+    printf("  Reason:     %d\n", reset_stats.reset_reason);
+    printf("  wdog cnt:   %d\n", reset_stats.watchdog_resets);
+    printf("  lockup cnt: %d\n", reset_stats.lockup_resets);
+
+    //TODO custom tighter watchdog
+    WatchdogStart({
+        .timeout_s = 2,
+        .pet_rate_s = 1,
+        .enable_irq = false
+    });
 
     //load config
     std::string csv = readConfigFile();
     printf("Read csv: %s\n", csv.c_str());
     //empty/non-existant file or malformed csv
-    if (!csv.size() || !configFromCsv(csv, &global_config)) {
-        global_config = buildDefaultConfig();
-        if (writeConfigFile(csvFromConfig(global_config))) {
+    if (!csv.size() || !configFromCsv(csv, &gl_config)) {
+        gl_config = buildDefaultConfig();
+        if (writeConfigFile(csvFromConfig(gl_config))) {
             printf("Failed to write config file\n");
-            vTaskDelete(NULL);
+            exit();
         }
         printf("Config regenerated\n");
     }
