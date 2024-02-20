@@ -3,7 +3,6 @@
 //TODO mask threshold wording
 
 //TODO configurable grid size
-//TODO rotation
 
 
 #include <cstdio>
@@ -93,6 +92,7 @@ bbox_vector_t gl_bboxes;
 /*----(FREERTOS)----*/
 SemaphoreHandle_t config_mux;
 SemaphoreHandle_t data_mux;
+SemaphoreHandle_t sync_sem;
 TaskHandle_t detect_task_handle;
 
 
@@ -143,9 +143,6 @@ bool configFromCsv(const std::string &csv, cfg_struct_t *config) {
             end = csv.size();
         }
         std::string field_val = csv.substr(start, end - start);
-
-        printf("%d %s %d %d\n", field_num, field_val.c_str(), start, end);
-        vTaskDelay(10);
 
         start = end + 1;
         end = csv.find(',', start);
@@ -516,7 +513,6 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
         return 1;
     else
         return consec_unmasked > 0 ? 2 : 0;
-        //return consec_unmasked <= 3 ? 2 : 3;
 }
 
 
@@ -535,7 +531,7 @@ static void detectTask(void *args) {
 
     CameraFrameFormat frame = {
         CameraFormat::kRgb,
-        CameraFilterMethod::kBilinear,
+        CameraFilterMethod::kNearestNeighbor,
         CameraRotation::k270,
         gl_image_size,
         gl_image_size,
@@ -544,44 +540,47 @@ static void detectTask(void *args) {
         true
     };
 
+    int average_time = 0;
+    std::deque<int> time_buf(10, 0);
+
     TickType_t last_wake_time;
     const TickType_t frequency = 50;
     while (true) {
-        vTaskDelayUntil(&last_wake_time, frequency);
+        //vTaskDelayUntil(&last_wake_time, frequency);
 
-        //get image
         int ticks = xTaskGetTickCount();
-        CameraTask::GetSingleton()->DiscardFrames(1);
         ret = CameraTask::GetSingleton()->GetFrame({frame});
         if (!ret) {
             printf("Failed to get image from camera.\r\n");
             gl_status = -1;
             continue;
         }
-        printf("Camera time: %d\n", xTaskGetTickCount() - ticks);
-
-        ticks = xTaskGetTickCount();
+        
         // run model
         if (interpreter->Invoke() != kTfLiteOk) {
             printf("Invoke failed\n");
             gl_status = -2;
             continue;
         }
-        printf("inference time: %d\n", xTaskGetTickCount() - ticks);
-
 
         if (gl_update_config) {
             xSemaphoreTake(config_mux, portMAX_DELAY);
             config = gl_config;
             gl_update_config = false;
             xSemaphoreGive(config_mux);
+            switch (gl_config.rotation) {
+                case 0:   frame.rotation = CameraRotation::k0;   break;
+                case 90:  frame.rotation = CameraRotation::k90;  break;
+                case 180: frame.rotation = CameraRotation::k180; break;
+                case 270: frame.rotation = CameraRotation::k270; break;
+            }
         }
 
-        ticks = xTaskGetTickCount();
         xSemaphoreTake(data_mux, portMAX_DELAY);
         gl_image = image_vector_t(tensor_input, tensor_input + gl_image_size * gl_image_size * 3);
         gl_status = getResults(&gl_bboxes, interpreter, gl_image, background, config);
         xSemaphoreGive(data_mux);
+        xSemaphoreGive(sync_sem);
 
         bckg_upd_cnt = gl_status ? 0 : bckg_upd_cnt + 1;
         LedSet(Led::kUser, gl_status > 1);
@@ -590,7 +589,14 @@ static void detectTask(void *args) {
             background = gl_image;
             printf("Background updated\n");
         }
-        printf("Result time: %d\n", xTaskGetTickCount() - ticks);
+        int average_time = 0;
+        time_buf.pop_front();
+        time_buf.push_back(xTaskGetTickCount() - ticks);
+        for (auto item : time_buf) {
+            average_time += item;
+        }
+        average_time /= 10;
+        printf("Average detect time: %d\n", average_time);
     }
 }
 
@@ -601,6 +607,7 @@ HttpServer::Content UriHandler(const char* uri) {
         return std::string(MAIN_WEB_PATH);
     
     else if (StrEndsWith(uri, STREAM_WEB_PATH)) {
+        xSemaphoreTake(sync_sem, portMAX_DELAY);
         xSemaphoreTake(data_mux, portMAX_DELAY);
         for (size_t i = 0; i < gl_bboxes.size(); i++) {
             switch (gl_bboxes[i].type) {
@@ -610,7 +617,7 @@ HttpServer::Content UriHandler(const char* uri) {
             }
         }
 
-         //not raw jpeg. Last byte is detection gl_status
+        //not raw jpeg. Last byte is detection gl_status
         image_vector_t jpeg;
         JpegCompressRgb(gl_image.data(), gl_image_size, gl_image_size, gl_config.jpeg_quality, &jpeg);
         jpeg.push_back(gl_status);
@@ -677,6 +684,7 @@ extern "C" [[noreturn]] void app_main(void* param) {
 
     config_mux = xSemaphoreCreateMutex();
     data_mux = xSemaphoreCreateMutex();
+    sync_sem = xSemaphoreCreateBinary();
 
     LedSet(Led::kStatus, true);
 
@@ -703,7 +711,7 @@ extern "C" [[noreturn]] void app_main(void* param) {
         gl_config = buildDefaultConfig();
         if (writeConfigFile(csvFromConfig(gl_config))) {
             printf("Failed to write config file\n");
-            exit();
+            ResetToFlash();
         }
         printf("Config regenerated\n");
     }
@@ -716,7 +724,7 @@ extern "C" [[noreturn]] void app_main(void* param) {
     if (!EthernetInit(true)) {
         //TODO run without ethernet?
         printf("Failed to init ethernet\n");
-        exit();
+        ResetToFlash();
     }
     auto ip_addr = EthernetGetIp();
     if (ip_addr.has_value())
