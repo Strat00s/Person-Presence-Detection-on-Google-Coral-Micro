@@ -38,3 +38,11 @@ no clue, but you can edit coralmicro/cmake/toolchain-arm-none-eabi-gcc.cmake to 
 
 ## Multicore
 Camera capture on M4 take over half a second (compared to about 30ms on M7...)
+M4 is just too slow
+
+## Framerate
+Sending raw image gives faster inference (about 15ms)
+But sending the raw image takes much longer compared to sending a jpeg
+Jpeg gives more frames in preview
+Raw image gives faster inference in preview
+Both are the same speed when not previewing
