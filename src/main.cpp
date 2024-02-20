@@ -219,7 +219,6 @@ std::string csvFromConfig(const cfg_struct_t &config) {
  * @return true on success, false otherwise
  */
 bool writeConfigFile(const std::string &csv) {
-    printf("Write config: %s\n", csv.c_str());
     return LfsWriteFile(CONFIG_PATH, csv);
 }
 

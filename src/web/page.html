@@ -60,7 +60,7 @@
 
 
     #gridCanvas {
-      display: 'none';
+      display: "none";
       position: absolute;
       width: 500px;
       height: 500px;
@@ -97,10 +97,10 @@
     <div class="config-group">
       <label for="image-rotation" class="input-label">Device rotation:</label>
       <select name="image-rotation" id="image-rotation">
-        <option value=0>0</option>
-        <option value=90>90</option>
-        <option value=180>180</option>
-        <option value=270>270</option>
+        <option value=0>0°</option>
+        <option value=90>90°</option>
+        <option value=180>180°</option>
+        <option value=270>270°</option>
       </select>
     </div>
 
@@ -108,14 +108,23 @@
       <label for="jpeg-quality">Preview quality:</label>
       <input type="number" id="jpeg-quality" name="jpeg-quality" size="3" maxlength="3" min="5" max="100">
       <label for="preview-size">Preview size:</label>
-      <input type="number" id="preview-size" name="preview-size" size="4" maxlength="4" min="200" max="1000">
+      <div class="input-wrapper">
+        <input type="number" id="preview-size" name="preview-size" onchange="resizePreview()" size="4" maxlength="4" min="200" max="1000">
+        <span>px</span>
+      </div>
     </div>
 
     <div class="config-group">
       <label for="mask-size">Mask size:</label>
-      <input type="number" id="mask-size" name="mask-size" size="3" maxlength="3" min="2" max="320">
-      <label for="mask-thresh">Mask threshold:</label>
-      <input type="number" id="mask-thresh" name="mask-thresh" size="3" maxlength="3" min="0" max="100">
+      <div class="input-wrapper">
+        <input type="number" id="mask-size" name="mask-size" onchange="resizeMask()" size="3" maxlength="3" min="2" max="80">
+        <span>c</span>
+      </div>
+      <label for="mask-thresh">Mask uncovered threshold:</label>
+      <div class="input-wrapper">
+        <input type="number" id="mask-thresh" name="mask-thresh" size="3" maxlength="3" min="0" max="100">
+        <span>%</span>
+      </div>
       <button id="toggleMaskBtn" onclick="toggleMask()">Toggle mask</button>
       <button id="resetMaskBtn" onclick="resetMask()">Reset mask</button>
     </div>
@@ -190,10 +199,7 @@
     //     [1] -> cell elements
     // Initialize grid and mask data structure
     //let mask = [new Array(maskSize), new Array(maskSize)];
-    let mask = {
-      "val": Array.from({ length: maskSize }, () => new Array(maskSize).fill(0)),
-      "elem": Array.from({ length: maskSize }, () => new Array(maskSize).fill(null))
-    };
+    let mask;
     let mouseIsDown = false; // Tracks if the mouse is pressed down
     let toggleDir = 0;
 
@@ -210,7 +216,7 @@
       document.getElementById("jpeg-quality").value = jpegQuality;
       document.getElementById("preview-size").value = previewSize;
       loadConfig();
-      createGrid();
+      //createGrid();
       updatePreview();
     }
 
@@ -256,10 +262,12 @@
         });
     }
 
+
     function updateDocument(values) {
       if (values.length < 9)
         throw Error("Invalid csv length of ", values.length);
       maskSize = values[0];
+      createMask();
       maskThresh = values[1];
       for (var i = 0; i < maskSize; i++) {
         for (var ii = 0; ii < maskSize; ii++) {
@@ -289,7 +297,7 @@
       getData(configLoadUrl, false)
         .then(config => {
           console.log("Config loaded");
-          updateDocument(config.split(','));
+          updateDocument(config.split(","));
         })
         .catch(error => console.error("Failed to load config: ", error));
     }
@@ -333,7 +341,7 @@
       getData(configResetUrl, false)
         .then(config => {
           console.log("Config reset loaded");
-          updateDocument(config.split(','));
+          updateDocument(config.split(","));
         })
         .catch(error => console.error("Failed to reset load config: ", error));
     }
@@ -350,14 +358,14 @@
     }
 
     function uploadConfig() {
-      var fileInput = document.getElementById('file-input');
+      var fileInput = document.getElementById("file-input");
       var file = fileInput.files[0]; // Get the file
       var reader = new FileReader();
 
       reader.onload = function (e) {
         var csv = e.target.result;
         console.log(csv);
-        updateDocument(csv.split(','));
+        updateDocument(csv.split(","));
       };
 
       reader.onerror = function (e) {
@@ -370,11 +378,11 @@
     }
 
     function toggleMask() {
-      var grid = document.getElementById('gridCanvas');
-      if (grid.style.display == 'none')
-        grid.style.display = 'block'; // The grid was hidden, now show it
+      var grid = document.getElementById("gridCanvas");
+      if (grid.style.display == "none")
+        grid.style.display = "block"; // The grid was hidden, now show it
       else
-        grid.style.display = 'none'; // The grid is visible, now hide it
+        grid.style.display = "none"; // The grid is visible, now hide it
     }
 
     function resetMask() {
@@ -390,35 +398,58 @@
     // Function to toggle cells
     function toggleCell(i, j) {
       if (toggleDir)
-        mask.elem[i][j].classList.add('toggled');//cell.classList.add('toggled');
+        mask.elem[i][j].classList.add("toggled");//cell.classList.add("toggled");
       else
-        mask.elem[i][j].classList.remove('toggled');//cell.classList.remove('toggled');
+        mask.elem[i][j].classList.remove("toggled");//cell.classList.remove("toggled");
 
       mask.val[i][j] = toggleDir;
     }
 
+
+    function resizeMask() {
+      maskSize = document.getElementById("mask-size").value;
+      createMask();
+      resetMask();
+    }
+
     // Function to create grid cells
-    function createGrid() {
-      const gridCanvas = document.getElementById('gridCanvas');
+    function createMask() {
+      const gridCanvas = document.getElementById("gridCanvas");
+
+      //remove cells if there are any
+      const cells = document.getElementsByClassName("cell");
+      while(cells.length) {
+        cells[0].parentNode.removeChild(cells[0]);
+      }
+
+      //create the mask
+      mask = {
+        "val": Array.from({ length: maskSize }, () => new Array(maskSize).fill(0)),
+        "elem": Array.from({ length: maskSize }, () => new Array(maskSize).fill(null))
+      };
+
+      //create the cells
       for (let i = 0; i < maskSize; i++) {
         for (let j = 0; j < maskSize; j++) {
-          const cell = document.createElement('div');
-          cell.className = 'cell';
+          const cell = document.createElement("div");
+          cell.className = "cell";
           cell.dataset.toggled = false; // Custom attribute to track state
+          cell.style.width = previewSize / maskSize + "px";
+          cell.style.height = previewSize / maskSize + "px";
 
-          cell.addEventListener('mousedown', function (event) {
+          cell.addEventListener("mousedown", function (event) {
             mouseIsDown = true;
             toggleDir = mask.val[i][j] ? 0 : 1;
             toggleCell(i, j);
             event.preventDefault(); // Prevent text selection
           });
 
-          cell.addEventListener('mouseenter', function () {
+          cell.addEventListener("mouseenter", function () {
             if (mouseIsDown)
               toggleCell(i, j);
           });
 
-          cell.addEventListener('mouseup', function () {
+          cell.addEventListener("mouseup", function () {
             mouseIsDown = false;
           });
 
@@ -429,50 +460,59 @@
     }
 
     // Reset the toggle tracking on mouseup anywhere in the window
-    window.addEventListener('mouseup', function () {
+    window.addEventListener("mouseup", function () {
       mouseIsDown = false;
-      let cells = document.getElementsByClassName('cell');
+      let cells = document.getElementsByClassName("cell");
       for (let cell of cells)
-        cell.dataset.toggled = false; // Reset all cells' state
+        cell.dataset.toggled = false; // Reset all cells" state
     });
+
+
+    function resizePreview() {
+      previewSize = document.getElementById("preview-size").value;
+      if (previewSize < 200) {
+        previewSize = 200;
+        document.getElementById("preview-size").value = 200;
+      }
+      document.getElementById("gridCanvas").style.width = previewSize + "px";
+      document.getElementById("gridCanvas").style.height = previewSize + "px";
+      document.getElementById("stream").width = previewSize;
+      document.getElementById("stream").height = previewSize;
+
+      var cells = document.getElementsByClassName("cell");
+      for (var i = 0; i < cells.length; i++) {
+        cells[i].style.width = previewSize / maskSize + "px";
+        cells[i].style.height = previewSize / maskSize + "px";
+      }
+    }
 
     // faster image reading using objecturl instead of fileread
     async function updatePreview() {
       while (1) {
         try {
-          // Fetch the binary data as an ArrayBuffer
-          let arrayBuffer = await fetch(imgUrl).then(resp => resp.arrayBuffer());
-
-          // Directly slice the ArrayBuffer to get the JPEG data (all but the last byte)
-          let jpegBuffer = arrayBuffer.slice(0, arrayBuffer.byteLength - 1);
-
-          // Convert the sliced buffer back to a Blob for the image
-          let imageBlob = new Blob([jpegBuffer], { type: 'image/jpeg' });
-
+          let arrayBuffer = await fetch(imgUrl).then(resp => resp.arrayBuffer()); //Get image with status
+          let jpegBuffer = arrayBuffer.slice(0, arrayBuffer.byteLength - 1);      //Slice jpeg from the data
+          let imageBlob = new Blob([jpegBuffer], { type: "image/jpeg" });
           let imgElem = document.getElementById("stream");
 
           // Revoke the previous object URL to avoid memory leaks
-          if (imgElem.src.startsWith('blob:'))
+          if (imgElem.src.startsWith("blob:"))
             URL.revokeObjectURL(imgElem.src);
 
           imgElem.src = URL.createObjectURL(imageBlob);
           imgElem.width = previewSize;
           imgElem.height = previewSize;
 
-          // Extract the last byte directly from the ArrayBuffer
+          //Get the last byte as status
           let extraByteView = new DataView(arrayBuffer);
-          // Get the last byte as a signed 8-bit integer
           let extraByteSigned = extraByteView.getInt8(arrayBuffer.byteLength - 1);
-
-          // Use `extraByteSigned` as needed
-          console.log("Extra data (signed int):", extraByteSigned);
           document.getElementById("status-field").value = extraByteSigned;
         } catch (reason) {
           console.error("Error while fetching image: " + reason.toString());
         }
 
         // Adjust this value as needed for performance and update frequency
-        await sleep(200);
+        await sleep(100);
       }
     }
 
