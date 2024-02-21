@@ -1,9 +1,5 @@
 //TODO output to pin
 
-//TODO mask threshold wording
-
-//TODO configurable grid size
-
 
 #include <cstdio>
 #include <vector>
@@ -18,31 +14,29 @@
 #include "libs/base/led.h"
 #include "libs/base/strings.h"
 #include "libs/base/utils.h"
-#include "libs/camera/camera.h"
-#include "libs/libjpeg/jpeg.h"
-#include "third_party/freertos_kernel/include/FreeRTOS.h"
-#include "third_party/freertos_kernel/include/task.h"
-#include "libs/base/filesystem.h"
-#include "libs/tensorflow/utils.h"
-#include "libs/tpu/edgetpu_manager.h"
-#include "third_party/tflite-micro/tensorflow/lite/micro/micro_error_reporter.h"
-#include "third_party/tflite-micro/tensorflow/lite/micro/micro_interpreter.h"
-#include "third_party/tflite-micro/tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "libs/base/gpio.h"
-#include "libs/tpu/edgetpu_op.h"
-
+#include "libs/base/filesystem.h"
 #include "libs/base/ethernet.h"
-#include "third_party/nxp/rt1176-sdk/middleware/lwip/src/include/lwip/dns.h"
-#include "third_party/nxp/rt1176-sdk/middleware/lwip/src/include/lwip/tcpip.h"
 #include "libs/base/check.h"
 #include "libs/base/watchdog.h"
 #include "libs/base/reset.h"
 #include "libs/base/mutex.h"
+#include "libs/camera/camera.h"
+#include "libs/libjpeg/jpeg.h"
+#include "libs/tensorflow/utils.h"
+#include "libs/tpu/edgetpu_op.h"
+#include "libs/tpu/edgetpu_manager.h"
+#include "third_party/freertos_kernel/include/FreeRTOS.h"
+#include "third_party/freertos_kernel/include/task.h"
+#include "third_party/nxp/rt1176-sdk/middleware/lwip/src/include/lwip/dns.h"
+#include "third_party/nxp/rt1176-sdk/middleware/lwip/src/include/lwip/tcpip.h"
+#include "third_party/tflite-micro/tensorflow/lite/micro/micro_error_reporter.h"
+#include "third_party/tflite-micro/tensorflow/lite/micro/micro_interpreter.h"
+#include "third_party/tflite-micro/tensorflow/lite/micro/micro_mutable_op_resolver.h"
 
 #include "local_libs/http_server.h"
 #include "structs.hpp"
-#include "ipc_message.hpp"
-#include "AwaitQueue.hpp"
+
 
 using namespace coralmicro;
 using namespace std;
@@ -50,7 +44,7 @@ using namespace std;
 
 #define IMAGE_SIZE gl_image_size * gl_image_size * 3
 
-
+/*----(WEB PATHS)----*/
 #define MAIN_WEB_PATH             "/page.html"
 #define STREAM_WEB_PATH           "/camera_stream"
 #define DETECTION_STATUS_WEB_PATH "/detection_status"
@@ -58,10 +52,14 @@ using namespace std;
 #define CONFIG_LOAD_WEB_PATH      "/config_load"
 #define CONFIG_RESET_WEB_PATH     "/config_reset"
 
-
+/*----(LOCAL FILES)----*/
 #define MODEL_PATH            "/model.tflite"
 #define CONFIG_PATH           "/cfg.csv"
 
+#define PIN0 kSpiCs
+#define PIN1 kSpiSck
+
+/*----(DEFAULT VALUES)----*/
 #define DEFAULT_IMAGE_SIZE   320
 #define DEFAULT_MASK_SIZE    32
 #define DEFAULT_ROTATION     270
@@ -545,7 +543,7 @@ static void detectTask(void *args) {
     TickType_t last_wake_time;
     const TickType_t frequency = 50;
     while (true) {
-        //vTaskDelayUntil(&last_wake_time, frequency);
+        vTaskDelayUntil(&last_wake_time, frequency);
 
         int ticks = xTaskGetTickCount();
         ret = CameraTask::GetSingleton()->GetFrame({frame});
@@ -566,28 +564,36 @@ static void detectTask(void *args) {
             xSemaphoreTake(config_mux, portMAX_DELAY);
             config = gl_config;
             gl_update_config = false;
-            xSemaphoreGive(config_mux);
             switch (gl_config.rotation) {
                 case 0:   frame.rotation = CameraRotation::k0;   break;
                 case 90:  frame.rotation = CameraRotation::k90;  break;
                 case 180: frame.rotation = CameraRotation::k180; break;
                 case 270: frame.rotation = CameraRotation::k270; break;
             }
+            xSemaphoreGive(config_mux);
         }
 
+        //get results from inference and update global variables
         xSemaphoreTake(data_mux, portMAX_DELAY);
         gl_image = image_vector_t(tensor_input, tensor_input + gl_image_size * gl_image_size * 3);
         gl_status = getResults(&gl_bboxes, interpreter, gl_image, background, config);
         xSemaphoreGive(data_mux);
-        xSemaphoreGive(sync_sem);
 
-        bckg_upd_cnt = gl_status ? 0 : bckg_upd_cnt + 1;
+        xSemaphoreGive(sync_sem);   //sync with web task (if it is waiting for us)
+
+        //toggle led and pins of detection
         LedSet(Led::kUser, gl_status > 1);
+        GpioSet(PIN0, gl_status & 0b00000001);
+        GpioSet(PIN1, gl_status > 1);
 
+        //update background
+        bckg_upd_cnt = gl_status ? 0 : bckg_upd_cnt + 1;
         if (bckg_upd_cnt >= 10) {
             background = gl_image;
             printf("Background updated\n");
         }
+
+        //TODO better?
         int average_time = 0;
         time_buf.pop_front();
         time_buf.push_back(xTaskGetTickCount() - ticks);
@@ -681,11 +687,13 @@ std::string postUriHandler(std::string uri, std::vector<uint8_t> payload) {
 extern "C" [[noreturn]] void app_main(void* param) {
     (void)param;
 
+    LedSet(Led::kStatus, true);
+    GpioSetMode(PIN0, GpioMode::kOutput);
+    GpioSetMode(PIN1, GpioMode::kOutput);
+
     config_mux = xSemaphoreCreateMutex();
     data_mux = xSemaphoreCreateMutex();
     sync_sem = xSemaphoreCreateBinary();
-
-    LedSet(Led::kStatus, true);
 
     vTaskDelay(5000);
 
@@ -720,19 +728,19 @@ extern "C" [[noreturn]] void app_main(void* param) {
 
     // Try and get an IP
     printf("Attempting to use ethernet...\r\n");
-    if (!EthernetInit(true)) {
-        //TODO run without ethernet?
+    bool eth_succ = EthernetInit(true);
+    if (!eth_succ) {
         printf("Failed to init ethernet\n");
-        ResetToFlash();
     }
-    auto ip_addr = EthernetGetIp();
-    if (ip_addr.has_value())
-        printf("DHCP succeeded, our IP is %s\n", ip_addr.value().c_str());
     else {
-        printf("We didn't get an IP via DHCP, not progressing further.\r\n");
-        exit();
+        auto ip_addr = EthernetGetIp();
+        if (ip_addr.has_value())
+            printf("DHCP succeeded, our IP is %s\n", ip_addr.value().c_str());
+        else {
+            printf("We didn't get an IP via DHCP. Continuing wihtout internet.\r\n");
+            eth_succ = false;
+        }
     }
-
 
 
     //Read the model and checks version.
@@ -790,6 +798,10 @@ extern "C" [[noreturn]] void app_main(void* param) {
 
     //start detection task
     xTaskCreate(detectTask, "detect", 16000, nullptr, 4, &detect_task_handle);
+
+    //skip http server if no internet
+    if (!eth_succ)
+        vTaskSuspend(nullptr);
 
     //start http server
     PostHttpServer http_server;

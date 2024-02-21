@@ -2,7 +2,7 @@
 [x] Background separation - adds lot of processing delay and does not really help
 [x] Rectangle drawing to page - not required as it is quite fast
 
-[] output to pin
+[X] output to pin
 [x] output to led
 [x] output to web
 [x] mask threshold wording
@@ -29,7 +29,7 @@
 [x] fix isCovered
 [] has changed average -> better calculcations
 
-[] detect brightness change
+[O] detect brightness change
 
 [x] UI???
 
@@ -37,3 +37,5 @@
 [] USB config?
 [] UART controls
 [] logging (to uart and web)
+
+[x] Run when ethernet fails
