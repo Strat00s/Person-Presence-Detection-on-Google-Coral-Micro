@@ -1,6 +1,3 @@
-//TODO output to pin
-
-
 #include <cstdio>
 #include <vector>
 #include <algorithm>
@@ -41,7 +38,7 @@
 using namespace coralmicro;
 using namespace std;
 
-
+/*----(FUNCTION MACROS)----*/
 #define IMAGE_SIZE gl_image_size * gl_image_size * 3
 
 /*----(WEB PATHS)----*/
@@ -242,7 +239,7 @@ std::string readConfigFile() {
  * @param g green channel value
  * @param b bluc channel value
  */
-void drawRectangleFast(bbox_t bbox, image_vector_t *image, int image_size, uint8_t r, uint8_t g, uint8_t b) {
+void drawRectangle(bbox_t bbox, image_vector_t *image, int image_size, uint8_t r, uint8_t g, uint8_t b) {
     if (bbox.xmin < 0)
         bbox.xmin = 0;
     if (bbox.ymin < 0)
@@ -384,8 +381,8 @@ float IoU(const bbox_t& a, const bbox_t& b) {
  * 2 if something is/was detected and is/was unmasked in last 5 frames.
  * 3 if something is detected, is unmasked and is detected in the last 3 out of 5 frames.
  */
-int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpreter, const image_vector_t &image,
-                                                    const image_vector_t &background, const cfg_struct_t &config) {
+int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpreter,
+               const image_vector_t &image, const image_vector_t &background, const cfg_struct_t &config) {
 
     static int consec_unmasked = 0; //keeps count of consecutive unmasked detections
 
@@ -616,9 +613,9 @@ HttpServer::Content UriHandler(const char* uri) {
         xSemaphoreTake(data_mux, portMAX_DELAY);
         for (size_t i = 0; i < gl_bboxes.size(); i++) {
             switch (gl_bboxes[i].type) {
-                case 0: drawRectangleFast(gl_bboxes[i], &gl_image, gl_image_size, 0,     0, 255); break;
-                case 1: drawRectangleFast(gl_bboxes[i], &gl_image, gl_image_size, 255, 255,   0); break;
-                case 2: drawRectangleFast(gl_bboxes[i], &gl_image, gl_image_size, 0,   255,   0); break;
+                case 0: drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 0,     0, 255); break;
+                case 1: drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 255, 255,   0); break;
+                case 2: drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 0,   255,   0); break;
             }
         }
 
@@ -712,7 +709,6 @@ extern "C" [[noreturn]] void app_main(void* param) {
 
     //load config
     std::string csv = readConfigFile();
-    printf("Read csv: %s\n", csv.c_str());
     //empty/non-existant file or malformed csv
     if (!csv.size() || !configFromCsv(csv, &gl_config)) {
         gl_config = buildDefaultConfig();

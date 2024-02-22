@@ -195,16 +195,15 @@
     var jpegQuality = 75;
 
 
-    //mask [0] -> mask values
-    //     [1] -> cell elements
-    // Initialize grid and mask data structure
+
+    //Initialize grid and mask data structure
     //let mask = [new Array(maskSize), new Array(maskSize)];
     let mask;
-    let mouseIsDown = false; // Tracks if the mouse is pressed down
+    let mouseIsDown = false; //Tracks if the mouse is pressed down
     let toggleDir = 0;
 
 
-    // start everything important on load
+    //start everything important on load
     function start() {
       document.getElementById("mask-size").value = maskSize;
       document.getElementById("mask-thresh").value = maskThresh;
@@ -247,7 +246,7 @@
     function getData(url, isJson) {
       return fetch(url)
         .then(response => {
-          // Check if the response is ok (status code 200-299)
+          //Check if the response is ok (status code 200-299)
           if (!response.ok) {
             console.error("Get not OK (", response.status, "): ", response.statusText);
             return Promise.reject("Get not OK");
@@ -359,7 +358,7 @@
 
     function uploadConfig() {
       var fileInput = document.getElementById("file-input");
-      var file = fileInput.files[0]; // Get the file
+      var file = fileInput.files[0]; //Get the file
       var reader = new FileReader();
 
       reader.onload = function (e) {
@@ -369,20 +368,32 @@
       };
 
       reader.onerror = function (e) {
-        // Handle errors
+        //Handle errors
         console.error("File could not be loaded: " + e.target.error.code);
       };
 
-      reader.readAsText(file); // Read the file as text
+      reader.readAsText(file); //Read the file as text
 
     }
+
+
+    //Function to toggle cells
+    function toggleCell(i, j) {
+      if (toggleDir)
+        mask.elem[i][j].classList.add("toggled");//cell.classList.add("toggled");
+      else
+        mask.elem[i][j].classList.remove("toggled");//cell.classList.remove("toggled");
+
+      mask.val[i][j] = toggleDir;
+    }
+
 
     function toggleMask() {
       var grid = document.getElementById("gridCanvas");
       if (grid.style.display == "none")
-        grid.style.display = "block"; // The grid was hidden, now show it
+        grid.style.display = "block"; //The grid was hidden, now show it
       else
-        grid.style.display = "none"; // The grid is visible, now hide it
+        grid.style.display = "none"; //The grid is visible, now hide it
     }
 
     function resetMask() {
@@ -394,25 +405,13 @@
       }
     }
 
-
-    // Function to toggle cells
-    function toggleCell(i, j) {
-      if (toggleDir)
-        mask.elem[i][j].classList.add("toggled");//cell.classList.add("toggled");
-      else
-        mask.elem[i][j].classList.remove("toggled");//cell.classList.remove("toggled");
-
-      mask.val[i][j] = toggleDir;
-    }
-
-
     function resizeMask() {
       maskSize = document.getElementById("mask-size").value;
       createMask();
       resetMask();
     }
 
-    // Function to create grid cells
+    //Function to create grid cells
     function createMask() {
       const gridCanvas = document.getElementById("gridCanvas");
 
@@ -433,7 +432,7 @@
         for (let j = 0; j < maskSize; j++) {
           const cell = document.createElement("div");
           cell.className = "cell";
-          cell.dataset.toggled = false; // Custom attribute to track state
+          cell.dataset.toggled = false; //Custom attribute to track state
           cell.style.width = previewSize / maskSize + "px";
           cell.style.height = previewSize / maskSize + "px";
 
@@ -441,7 +440,7 @@
             mouseIsDown = true;
             toggleDir = mask.val[i][j] ? 0 : 1;
             toggleCell(i, j);
-            event.preventDefault(); // Prevent text selection
+            event.preventDefault(); //Prevent text selection
           });
 
           cell.addEventListener("mouseenter", function () {
@@ -459,12 +458,12 @@
       }
     }
 
-    // Reset the toggle tracking on mouseup anywhere in the window
+    //Reset the toggle tracking on mouseup anywhere in the window
     window.addEventListener("mouseup", function () {
       mouseIsDown = false;
       let cells = document.getElementsByClassName("cell");
       for (let cell of cells)
-        cell.dataset.toggled = false; // Reset all cells" state
+        cell.dataset.toggled = false; //Reset all cells" state
     });
 
 
@@ -486,7 +485,7 @@
       }
     }
 
-    // faster image reading using objecturl instead of fileread
+    //faster image reading using objecturl instead of fileread
     async function updatePreview() {
       while (1) {
         try {
@@ -495,7 +494,7 @@
           let imageBlob = new Blob([jpegBuffer], { type: "image/jpeg" });
           let imgElem = document.getElementById("stream");
 
-          // Revoke the previous object URL to avoid memory leaks
+          //Revoke the previous object URL to avoid memory leaks
           if (imgElem.src.startsWith("blob:"))
             URL.revokeObjectURL(imgElem.src);
 
@@ -511,7 +510,7 @@
           console.error("Error while fetching image: " + reason.toString());
         }
 
-        // Adjust this value as needed for performance and update frequency
+        //Adjust this value as needed for performance and update frequency
         await sleep(100);
       }
     }
@@ -520,7 +519,7 @@
       return new Promise((resolve) => setTimeout(resolve, ms));
     }
 
-    // Call createGrid on page load
+    //Call createGrid on page load
     //window.onload = createGrid;
   </script>
 
