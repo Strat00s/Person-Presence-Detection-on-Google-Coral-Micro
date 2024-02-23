@@ -29,6 +29,8 @@
 [X] ~~Reinit EDGEtpu on failure?~~ Just restart...
 [] Test other models
 [] Better error handling on webpage
-[] Ignore bboxes that are too small
+[X] Ignore bboxes that are too small
+    [] Add new status (red box) if something is too small but was detected
+    [] do not update when something small is detected
 
 [] logging (to uart and web)

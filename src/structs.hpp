@@ -28,6 +28,9 @@ typedef struct{
     int fp_change;
     int fp_count;
     int jpeg_quality;
+    int min_width;
+    int min_height;
+    bool min_as_area;
 } cfg_struct_t;
 
 typedef struct {

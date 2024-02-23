@@ -116,10 +116,8 @@
 
     <div class="config-group">
       <label for="mask-size">Mask size:</label>
-      <div class="input-wrapper">
-        <input type="number" id="mask-size" name="mask-size" onchange="resizeMask()" size="3" maxlength="3" min="2" max="80">
-        <span>c</span>
-      </div>
+      <input type="number" id="mask-size" name="mask-size" onchange="resizeMask()" size="3" maxlength="3" min="2" max="80">
+
       <label for="mask-thresh">Uncovered threshold:</label>
       <div class="input-wrapper">
         <input type="number" id="mask-thresh" name="mask-thresh" size="3" maxlength="3" min="0" max="100">
@@ -136,7 +134,7 @@
         <span>%</span>
       </div>
 
-      <label for="iou-thresh">Overlap threshold:</label>
+      <label for="iou-thresh">Detection overlap threshold:</label>
       <div class="input-wrapper">
         <input type="number" id="iou-thresh" name="iou-thresh" size="3" maxlength="3" min="0" max="100">
         <span>%</span>
@@ -155,6 +153,22 @@
         <input type="number" id="fp-count" name="fp-count" size="3" maxlength="3" min="0" max="100">
         <span>%</span>
       </div>
+      <br>
+      <br>
+      <label for="min-width">False-positive min width:</label>
+      <div class="input-wrapper">
+        <input type="number" id="min-width" name="min-width" size="3" maxlength="3" min="0" max="320">
+        <span>px</span>
+      </div>
+
+      <label for="min-height">False-positive min height:</label>
+      <div class="input-wrapper">
+        <input type="number" id="min-height" name="min-height" size="3" maxlength="3" min="0" max="320">
+        <span>px</span>
+      </div>
+
+      <label for="min-as-area">Treat as area:</label>
+      <input type="checkbox" id="min-as-area" name="min-as-area">
     </div>
 
     <div class="config-group">
@@ -193,6 +207,9 @@
     var fpChange    = 0;
     var fpCount     = 0;
     var jpegQuality = 70;
+    var minWidth    = 0;
+    var minHeight   = 0;
+    var minAsArea   = false;
 
     var mask;
     var mouseIsDown = false; //Tracks if the mouse is pressed down
@@ -261,22 +278,25 @@
 
 
     function updateElements() {
-      document.getElementById("mask-size").value      = maskSize;
-      document.getElementById("mask-thresh").value    = maskThresh;
-      document.getElementById("image-rotation").value = rotation;
-      document.getElementById("det-thresh").value     = detThresh;
-      document.getElementById("iou-thresh").value     = iouThresh;
-      document.getElementById("fp-change").value      = fpChange;
-      document.getElementById("fp-count").value       = fpCount;
-      document.getElementById("jpeg-quality").value   = jpegQuality;
-      document.getElementById("preview-size").value   = previewSize;
+      document.getElementById("mask-size").value       = maskSize;
+      document.getElementById("mask-thresh").value     = maskThresh;
+      document.getElementById("image-rotation").value  = rotation;
+      document.getElementById("det-thresh").value      = detThresh;
+      document.getElementById("iou-thresh").value      = iouThresh;
+      document.getElementById("fp-change").value       = fpChange;
+      document.getElementById("fp-count").value        = fpCount;
+      document.getElementById("jpeg-quality").value    = jpegQuality;
+      document.getElementById("preview-size").value    = previewSize;
+      document.getElementById("min-width").value       = minWidth;
+      document.getElementById("min-height").value      = minHeight;
+      document.getElementById("min-as-area").checked   = minAsArea;
     }
 
     //Update all required elements
     function updateDocument(values) {
-      if (values.length < 9)
+      if (values.length < 11)
         throw Error("Invalid csv length of ", values.length);
-      maskSize = clamp(values[0], 2, 80);
+      maskSize = clamp(Number(values[0]), 2, 80);
       createMask();
       maskThresh = clamp(values[1], 0, 100);
       for (var i = 0; i < maskSize; i++) {
@@ -286,12 +306,15 @@
           toggleCell(i, ii);
         }
       }
-      rotation    = clamp(values[3], 0, 270);
-      detThresh   = clamp(values[4], 0, 100);
-      iouThresh   = clamp(values[5], 0, 100);
-      fpChange    = clamp(values[6], 0, 100);
-      fpCount     = clamp(values[7], 0, 100);
-      jpegQuality = clamp(values[8], 5, 100);
+      rotation    = clamp(Number(values[3]),  0, 270);
+      detThresh   = clamp(Number(values[4]),  0, 100);
+      iouThresh   = clamp(Number(values[5]),  0, 100);
+      fpChange    = clamp(Number(values[6]),  0, 100);
+      fpCount     = clamp(Number(values[7]),  0, 100);
+      jpegQuality = clamp(Number(values[8]),  5, 100);
+      minWidth    = clamp(Number(values[9]),  0, 320);
+      minHeight   = clamp(Number(values[10]), 0, 320);
+      minAsArea   = clamp(Number(values[11]), 0, 1) ? true : false;
 
       updateElements()
     }
@@ -315,14 +338,17 @@
         })
       })
       var csv = maskSize.toString() + ",";
-      csv += maskThresh.toString() + ",";
-      csv += maskVal + ",";
-      csv += rotation.toString() + ",";
-      csv += detThresh.toString() + ",";
-      csv += iouThresh.toString() + ",";
-      csv += fpChange.toString() + ",";
-      csv += fpCount.toString() + ",";
-      csv += jpegQuality.toString();
+      csv += maskThresh.toString()  + ",";
+      csv += maskVal                + ",";
+      csv += rotation.toString()    + ",";
+      csv += detThresh.toString()   + ",";
+      csv += iouThresh.toString()   + ",";
+      csv += fpChange.toString()    + ",";
+      csv += fpCount.toString()     + ",";
+      csv += jpegQuality.toString() + ',';
+      csv += minWidth.toString()    + ',';
+      csv += minHeight.toString()   + ',';
+      csv += minAsArea ? '1' : '0';
       return csv;
     }
 
@@ -336,6 +362,9 @@
       fpChange    = clamp(document.getElementById("fp-change").value,      0, 100);
       fpCount     = clamp(document.getElementById("fp-count").value,       0, 100);
       jpegQuality = clamp(document.getElementById("jpeg-quality").value,   5, 100);
+      minWidth    = clamp(document.getElementById("min-width").value,      0, 320);
+      minHeight   = clamp(document.getElementById("min-height").value,     0, 320);
+      minAsArea   = document.getElementById("min-as-area").checked;
       updateElements();
 
       var csv = csvFromConfig();
@@ -358,12 +387,12 @@
     function downloadConfig() {
       var csv = csvFromConfig();
       var blob = new Blob([csv], { type: "text/plain" }); //Create a blob with the text
-      var a = document.createElement("a");                 //Create an anchor element and set the URL to the blob
+      var a = document.createElement("a");                //Create an anchor element and set the URL to the blob
       a.href = URL.createObjectURL(blob);
-      a.download = "config.csv";                           //Define file name
-      document.body.appendChild(a);                        //Append the anchor to the document
-      a.click();                                           //Trigger the download by simulating a click
-      document.body.removeChild(a);                        //Clean up by removing the element
+      a.download = "config.csv";    //Define file name
+      document.body.appendChild(a); //Append the anchor to the document
+      a.click();                    //Trigger the download by simulating a click
+      document.body.removeChild(a); //Clean up by removing the element
     }
 
     //Upload a csv file as config
@@ -435,7 +464,7 @@
 
       //create the mask
       mask = {
-        "val": Array.from({ length: maskSize }, () => new Array(maskSize).fill(0)),
+        "val":  Array.from({ length: maskSize }, () => new Array(maskSize).fill(0)),
         "elem": Array.from({ length: maskSize }, () => new Array(maskSize).fill(null))
       };
 
@@ -445,7 +474,7 @@
           const cell = document.createElement("div");
           cell.className = "cell";
           cell.dataset.toggled = false; //Custom attribute to track state
-          cell.style.width = previewSize / maskSize + "px";
+          cell.style.width  = previewSize / maskSize + "px";
           cell.style.height = previewSize / maskSize + "px";
 
           cell.addEventListener("mousedown", function (event) {
@@ -483,14 +512,14 @@
       previewSize = clamp(document.getElementById("preview-size").value, 200, 1000);
       updateElements();
 
-      document.getElementById("gridCanvas").style.width = previewSize + "px";
+      document.getElementById("gridCanvas").style.width  = previewSize + "px";
       document.getElementById("gridCanvas").style.height = previewSize + "px";
-      document.getElementById("stream").width = previewSize;
+      document.getElementById("stream").width  = previewSize;
       document.getElementById("stream").height = previewSize;
 
       var cells = document.getElementsByClassName("cell");
       for (var i = 0; i < cells.length; i++) {
-        cells[i].style.width = previewSize / maskSize + "px";
+        cells[i].style.width  = previewSize / maskSize + "px";
         cells[i].style.height = previewSize / maskSize + "px";
       }
     }
@@ -500,16 +529,16 @@
       while (1) {
         try {
           let arrayBuffer = await fetch(imgUrl).then(resp => resp.arrayBuffer()); //Get image with status
-          let jpegBuffer = arrayBuffer.slice(0, arrayBuffer.byteLength - 1);      //Slice jpeg from the data
-          let imageBlob = new Blob([jpegBuffer], { type: "image/jpeg" });
-          let imgElem = document.getElementById("stream");
+          let jpegBuffer  = arrayBuffer.slice(0, arrayBuffer.byteLength - 1);      //Slice jpeg from the data
+          let imageBlob   = new Blob([jpegBuffer], { type: "image/jpeg" });
+          let imgElem     = document.getElementById("stream");
 
           //Revoke the previous object URL to avoid memory leaks
           if (imgElem.src.startsWith("blob:"))
             URL.revokeObjectURL(imgElem.src);
 
-          imgElem.src = URL.createObjectURL(imageBlob);
-          imgElem.width = previewSize;
+          imgElem.src    = URL.createObjectURL(imageBlob);
+          imgElem.width  = previewSize;
           imgElem.height = previewSize;
 
           //Get the last byte as status

@@ -72,6 +72,9 @@ using namespace std;
 #define DEFAULT_FP_COUNT     0
 #define DEFAULT_JPEG_QUALITY 70
 #define DEFAULT_MASK_THRESH  70
+#define DEFAULT_MIN_WIDTH    0
+#define DEFAULT_MIN_HEIGHT   0
+#define DEFAULT_MIN_AS_AREA  false
 
 #define TENSOR_ARENA_SIZE     8 * 1024 * 1024
 STATIC_TENSOR_ARENA_IN_SDRAM(tensor_arena, TENSOR_ARENA_SIZE);
@@ -115,6 +118,9 @@ cfg_struct_t buildDefaultConfig() {
     cfg.fp_change    = DEFAULT_FP_CHANGE;
     cfg.fp_count     = DEFAULT_FP_COUNT;
     cfg.jpeg_quality = DEFAULT_JPEG_QUALITY;
+    cfg.min_width    = DEFAULT_MIN_WIDTH;
+    cfg.min_height   = DEFAULT_MIN_HEIGHT;
+    cfg.min_as_area  = DEFAULT_MIN_AS_AREA;
     cfg.mask.resize(cfg.mask_size * cfg.mask_size, 0);
     return cfg;
 }
@@ -126,8 +132,8 @@ cfg_struct_t buildDefaultConfig() {
  * @return true on success, false on invalid csv (csv has less tha 8 fields)
  */
 bool configFromCsv(const std::string &csv, cfg_struct_t *config) {
-    if (std::count(csv.begin(), csv.end(), ',') < 8) {
-        printf("invalid csv\n");
+    if (std::count(csv.begin(), csv.end(), ',') < 11) {
+        printf("invalid csv received\n");
         return false;
     }
 
@@ -176,14 +182,17 @@ bool configFromCsv(const std::string &csv, cfg_struct_t *config) {
 
         //everything but mask
         switch (field_num) {
-            case 0: new_config.mask_size    = val; break;
-            case 1: new_config.mask_thresh  = val; break;
-            case 3: new_config.rotation     = val; break;
-            case 4: new_config.det_thresh   = val; break;
-            case 5: new_config.iou_thresh   = val; break;
-            case 6: new_config.fp_change    = val; break;
-            case 7: new_config.fp_count     = val; break;
-            case 8: new_config.jpeg_quality = val; break;
+            case 0:  new_config.mask_size    = val; break;
+            case 1:  new_config.mask_thresh  = val; break;
+            case 3:  new_config.rotation     = val; break;
+            case 4:  new_config.det_thresh   = val; break;
+            case 5:  new_config.iou_thresh   = val; break;
+            case 6:  new_config.fp_change    = val; break;
+            case 7:  new_config.fp_count     = val; break;
+            case 8:  new_config.jpeg_quality = val; break;
+            case 9:  new_config.min_width    = val; break;
+            case 10: new_config.min_height   = val; break;
+            case 11: new_config.min_as_area  = val; break;
             default: printf("Unhandled field %d: %s\n", field_num, field_val.c_str()); break;
         }
     }
@@ -206,12 +215,15 @@ std::string csvFromConfig(const cfg_struct_t &config) {
     for (auto val: config.mask)
         csv += std::to_string(val);
     csv += ',';
-    csv += std::to_string(config.rotation)   + ',';
-    csv += std::to_string(config.det_thresh) + ',';
-    csv += std::to_string(config.iou_thresh) + ',';
-    csv += std::to_string(config.fp_change)  + ',';
-    csv += std::to_string(config.fp_count)   + ',';
-    csv += std::to_string(config.jpeg_quality);
+    csv += std::to_string(config.rotation)     + ',';
+    csv += std::to_string(config.det_thresh)   + ',';
+    csv += std::to_string(config.iou_thresh)   + ',';
+    csv += std::to_string(config.fp_change)    + ',';
+    csv += std::to_string(config.fp_count)     + ',';
+    csv += std::to_string(config.jpeg_quality) + ',';
+    csv += std::to_string(config.min_width)    + ',';
+    csv += std::to_string(config.min_height)   + ',';
+    csv += config.min_as_area ? '1' : '0';
     return csv;
 }
 
@@ -393,10 +405,10 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
 
     static int consec_unmasked = 0; //keeps count of consecutive unmasked detections
 
-    float det_thresh  = config.det_thresh / 100.0f;
-    float iou_thresh  = config.iou_thresh / 100.0f;
-    float fp_change   = config.fp_change  / 100.0f;
-    float fp_count    = config.fp_count   / 100.0f;
+    float det_thresh  = config.det_thresh  / 100.0f;
+    float iou_thresh  = config.iou_thresh  / 100.0f;
+    float fp_change   = config.fp_change   / 100.0f;
+    float fp_count    = config.fp_count    / 100.0f;
     float mask_thresh = config.mask_thresh / 100.0f;
     //get data from output tensor
     float *bboxes, *ids, *scores, *count;
@@ -433,6 +445,16 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
             bbox.xmax = gl_image_size - 1;
         if (bbox.ymax >= gl_image_size)
             bbox.ymax = gl_image_size - 1;
+
+        if (config.min_as_area) {
+            if (config.min_width * config.min_height > (bbox.xmax - bbox.xmin) * (bbox.ymax - bbox.ymin))
+                continue;
+        }
+        else {
+            if (config.min_width > (bbox.xmax - bbox.xmin) || config.min_height > (bbox.ymax - bbox.ymin))
+                continue;
+        }
+
         tmp_results.push_back(bbox);
     }
 
@@ -485,7 +507,6 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
                 it++;
         }
 
-        //TODO join haschange and ismasked to single function (single loop)
         //ignore boxes with not enough change
         if (!hasBBoxChanged(image, background, gl_image_size, current_box, fp_change, fp_count)) {
             //printf("False positive %d\n");
@@ -713,11 +734,13 @@ extern "C" [[noreturn]] void app_main(void* param) {
 
     //load config
     std::string csv = readConfigFile();
+    printf("%s\n", csv.c_str());
     //empty/non-existant file or malformed csv
     if (!csv.size() || !configFromCsv(csv, &gl_config)) {
         gl_config = buildDefaultConfig();
-        if (writeConfigFile(csvFromConfig(gl_config))) {
+        if (!writeConfigFile(csvFromConfig(gl_config))) {
             printf("Failed to write config file\n");
+            vTaskDelay(1000);
             ResetToFlash();
         }
         printf("Config regenerated\n");
