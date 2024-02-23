@@ -113,14 +113,16 @@ class PostHttpServer : public HttpServer {
     //   the request.
     // @param response_uri_len Size of the 'response_uri' buffer.
     void PostFinished(void* connection, char* response_uri, u16_t response_uri_len) {
-        // write a file path to the response_uri of a file that is stored inside the device in its fs (/index.html for example is the main web page)
+        //no matter what, filename just won't work. At least URI path does work
+        //write a uri path to the response_uri of a file that is stored inside the device in its fs (/index.html for example is the main web page)
+        //uri path must be handled by normal http server uri handler (http_server.AddUriHandler())
+        //'/index.html' returns the main page
+        //'/ok' returns 'ok.html' as urihandler returns it for '/ok' path
 
         //call callback
         std::string path = postUriHandlerCallback(payload_buffer[connection].uri, payload_buffer[connection].payload);
-        if (path.size()) {
-            printf("%s\n", path.c_str());
+        if (path.size())
             snprintf(response_uri, response_uri_len, "%s", path.c_str());
-        }
 
         //remove current buffer
         payload_buffer.erase(connection);

@@ -41,17 +41,23 @@ using namespace std;
 /*----(FUNCTION MACROS)----*/
 #define IMAGE_SIZE gl_image_size * gl_image_size * 3
 
+/*----(WEB RESPONSES)----*/
+#define MAIN_PAGE_RESPONSE "/page.html"
+#define OK_RESPONSE        "/ok.txt"
+#define ERR_RESPONSE       "/err.txt"
+
 /*----(WEB PATHS)----*/
-#define MAIN_WEB_PATH             "/page.html"
 #define STREAM_WEB_PATH           "/camera_stream"
 #define DETECTION_STATUS_WEB_PATH "/detection_status"
 #define CONFIG_SAVE_WEB_PATH      "/config_save"
 #define CONFIG_LOAD_WEB_PATH      "/config_load"
 #define CONFIG_RESET_WEB_PATH     "/config_reset"
+#define OK_WEB_PATH               "/ok"
+#define ERR_WEB_PATH              "/err"
 
 /*----(LOCAL FILES)----*/
-#define MODEL_PATH            "/model.tflite"
-#define CONFIG_PATH           "/cfg.csv"
+#define MODEL_PATH  "/model.tflite"
+#define CONFIG_PATH "/cfg.csv"
 
 #define PIN0 kSpiCs
 #define PIN1 kSpiSck
@@ -62,10 +68,10 @@ using namespace std;
 #define DEFAULT_ROTATION     270
 #define DEFAULT_DET_THRESH   50
 #define DEFAULT_IOU_THRESH   50
-#define DEFAULT_FP_CHANGE    40
-#define DEFAULT_FP_COUNT     5
-#define DEFAULT_JPEG_QUALITY 75
-#define DEFAULT_MASK_THRESH  50
+#define DEFAULT_FP_CHANGE    0
+#define DEFAULT_FP_COUNT     0
+#define DEFAULT_JPEG_QUALITY 70
+#define DEFAULT_MASK_THRESH  70
 
 #define TENSOR_ARENA_SIZE     8 * 1024 * 1024
 STATIC_TENSOR_ARENA_IN_SDRAM(tensor_arena, TENSOR_ARENA_SIZE);
@@ -96,6 +102,7 @@ void exit() {
     LedSet(Led::kStatus, false);
     vTaskSuspend(NULL);
 }
+
 
 /*----(CONFIG HANDLING)----*/
 cfg_struct_t buildDefaultConfig() {
@@ -517,10 +524,10 @@ static void detectTask(void *args) {
     int bckg_upd_cnt = 0;
 
     gl_status = 0;
-    gl_image.resize(gl_image_size * gl_image_size * 3);
+    gl_image.resize(IMAGE_SIZE);
 
     cfg_struct_t config = gl_config;
-    image_vector_t background(gl_image_size * gl_image_size * 3);
+    image_vector_t background(IMAGE_SIZE);
     uint8_t *tensor_input = tflite::GetTensorData<uint8_t>(interpreter->input_tensor(0));
 
     CameraFrameFormat frame = {
@@ -534,8 +541,7 @@ static void detectTask(void *args) {
         true
     };
 
-    int average_time = 0;
-    std::deque<int> time_buf(10, 0);
+    int inference_time = 0;
 
     TickType_t last_wake_time;
     const TickType_t frequency = 50;
@@ -547,14 +553,18 @@ static void detectTask(void *args) {
         if (!ret) {
             printf("Failed to get image from camera.\r\n");
             gl_status = -1;
-            continue;
+            xSemaphoreGive(sync_sem);
+            vTaskDelay(500);
+            ResetToFlash();
         }
         
         // run model
         if (interpreter->Invoke() != kTfLiteOk) {
             printf("Invoke failed\n");
             gl_status = -2;
-            continue;
+            xSemaphoreGive(sync_sem);
+            vTaskDelay(500);
+            ResetToFlash();
         }
 
         if (gl_update_config) {
@@ -572,10 +582,9 @@ static void detectTask(void *args) {
 
         //get results from inference and update global variables
         xSemaphoreTake(data_mux, portMAX_DELAY);
-        gl_image = image_vector_t(tensor_input, tensor_input + gl_image_size * gl_image_size * 3);
+        gl_image = image_vector_t(tensor_input, tensor_input + IMAGE_SIZE);
         gl_status = getResults(&gl_bboxes, interpreter, gl_image, background, config);
         xSemaphoreGive(data_mux);
-
         xSemaphoreGive(sync_sem);   //sync with web task (if it is waiting for us)
 
         //toggle led and pins of detection
@@ -590,15 +599,8 @@ static void detectTask(void *args) {
             printf("Background updated\n");
         }
 
-        //TODO better?
-        int average_time = 0;
-        time_buf.pop_front();
-        time_buf.push_back(xTaskGetTickCount() - ticks);
-        for (auto item : time_buf) {
-            average_time += item;
-        }
-        average_time /= 10;
-        printf("Average detect time: %d\n", average_time);
+        inference_time = (inference_time + xTaskGetTickCount() - ticks) / 2;
+        printf("Average detect time: %d\n", inference_time);
     }
 }
 
@@ -606,8 +608,8 @@ static void detectTask(void *args) {
 /*----(WEB HADNLING)----*/
 HttpServer::Content UriHandler(const char* uri) {
     if (StrEndsWith(uri, "index.shtml") || StrEndsWith(uri, "index.html"))
-        return std::string(MAIN_WEB_PATH);
-    
+        return std::string(MAIN_PAGE_RESPONSE);
+
     else if (StrEndsWith(uri, STREAM_WEB_PATH)) {
         xSemaphoreTake(sync_sem, portMAX_DELAY);
         xSemaphoreTake(data_mux, portMAX_DELAY);
@@ -652,12 +654,14 @@ HttpServer::Content UriHandler(const char* uri) {
         return std::vector<uint8_t>(csv.begin(), csv.end());
     }
 
+    else if (StrEndsWith(uri, OK_WEB_PATH)) {
+        return std::string(OK_RESPONSE);
+    }
+
     return {};
 }
 
 std::string postUriHandler(std::string uri, std::vector<uint8_t> payload) {
-    printf("on post finished\r\n");
-
     if (StrEndsWith(uri, CONFIG_SAVE_WEB_PATH)) {
         std::string csv = std::string(payload.begin(), payload.end());
 
@@ -670,9 +674,9 @@ std::string postUriHandler(std::string uri, std::vector<uint8_t> payload) {
 
         if (!writeConfigFile(csv)) {
             printf("Failed to write csv to file\n");
+            return {};
         }
-
-        return "/200.html";
+        return std::string(OK_WEB_PATH);
     }
 
     printf("unhandled uri: %s\n", uri.c_str());
@@ -692,7 +696,7 @@ extern "C" [[noreturn]] void app_main(void* param) {
     data_mux = xSemaphoreCreateMutex();
     sync_sem = xSemaphoreCreateBinary();
 
-    vTaskDelay(5000);
+    vTaskDelay(5000); //TODO remove
 
     auto reset_stats = ResetGetStats();
     printf("Reset stats:\n");
@@ -727,6 +731,7 @@ extern "C" [[noreturn]] void app_main(void* param) {
     bool eth_succ = EthernetInit(true);
     if (!eth_succ) {
         printf("Failed to init ethernet\n");
+        ResetToFlash();
     }
     else {
         auto ip_addr = EthernetGetIp();

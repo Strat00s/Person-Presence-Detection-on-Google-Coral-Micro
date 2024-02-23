@@ -82,7 +82,7 @@
   </style>
 
 
-  <title>Camera grid mask</title>
+  <title>Detection preview & config</title>
 </head>
 
 <body id="body" onload="start()">
@@ -120,7 +120,7 @@
         <input type="number" id="mask-size" name="mask-size" onchange="resizeMask()" size="3" maxlength="3" min="2" max="80">
         <span>c</span>
       </div>
-      <label for="mask-thresh">Mask uncovered threshold:</label>
+      <label for="mask-thresh">Uncovered threshold:</label>
       <div class="input-wrapper">
         <input type="number" id="mask-thresh" name="mask-thresh" size="3" maxlength="3" min="0" max="100">
         <span>%</span>
@@ -178,48 +178,36 @@
 
 
   <script>
-    const imgUrl = "/camera_stream"; //get
-    const configSaveUrl = "/config_save"; //get set
-    const configLoadUrl = "/config_load"; //get set
+    const imgUrl         = "/camera_stream"; //get
+    const configSaveUrl  = "/config_save"; //get set
+    const configLoadUrl  = "/config_load"; //get set
     const configResetUrl = "/config_reset";
-    const statusUrl = "/detection_status";
+    const statusUrl      = "/detection_status";
 
     var previewSize = 500;
-    var maskSize = 32; //current mask size (cell count per dimension)
-    var maskThresh = 50;
-    var rotation = 270;
-    var detThresh = 50;
-    var iouThresh = 50;
-    var fpChange = 40;
-    var fpCount = 5;
-    var jpegQuality = 75;
+    var maskSize    = 32; //current mask size (cell count per dimension)
+    var maskThresh  = 50;
+    var rotation    = 270;
+    var detThresh   = 50;
+    var iouThresh   = 50;
+    var fpChange    = 0;
+    var fpCount     = 0;
+    var jpegQuality = 70;
 
-
-
-    //Initialize grid and mask data structure
-    //let mask = [new Array(maskSize), new Array(maskSize)];
-    let mask;
-    let mouseIsDown = false; //Tracks if the mouse is pressed down
-    let toggleDir = 0;
+    var mask;
+    var mouseIsDown = false; //Tracks if the mouse is pressed down
+    var toggleDir   = 0;
 
 
     //start everything important on load
     function start() {
-      document.getElementById("mask-size").value = maskSize;
-      document.getElementById("mask-thresh").value = maskThresh;
-      document.getElementById("image-rotation").value = rotation;
-      document.getElementById("det-thresh").value = detThresh;
-      document.getElementById("iou-thresh").value = iouThresh;
-      document.getElementById("fp-change").value = fpChange;
-      document.getElementById("fp-count").value = fpCount;
-      document.getElementById("jpeg-quality").value = jpegQuality;
-      document.getElementById("preview-size").value = previewSize;
+      updateElements()
       loadConfig();
-      //createGrid();
       updatePreview();
     }
 
 
+    //Post data to device
     function postData(url, type, data) {
       return fetch(url, {
         method: "POST",
@@ -243,6 +231,7 @@
         .catch(error => console.error("Error: ", error))
     }
 
+    //Get data from device
     function getData(url, isJson) {
       return fetch(url)
         .then(response => {
@@ -262,12 +251,34 @@
     }
 
 
+    function clamp(val, min, max) {
+      if (val < min)
+        return min;
+      if (val > max)
+        return max;
+      return val;
+    }
+
+
+    function updateElements() {
+      document.getElementById("mask-size").value      = maskSize;
+      document.getElementById("mask-thresh").value    = maskThresh;
+      document.getElementById("image-rotation").value = rotation;
+      document.getElementById("det-thresh").value     = detThresh;
+      document.getElementById("iou-thresh").value     = iouThresh;
+      document.getElementById("fp-change").value      = fpChange;
+      document.getElementById("fp-count").value       = fpCount;
+      document.getElementById("jpeg-quality").value   = jpegQuality;
+      document.getElementById("preview-size").value   = previewSize;
+    }
+
+    //Update all required elements
     function updateDocument(values) {
       if (values.length < 9)
         throw Error("Invalid csv length of ", values.length);
-      maskSize = values[0];
+      maskSize = clamp(values[0], 2, 80);
       createMask();
-      maskThresh = values[1];
+      maskThresh = clamp(values[1], 0, 100);
       for (var i = 0; i < maskSize; i++) {
         for (var ii = 0; ii < maskSize; ii++) {
           mask.val[i][ii] = Number(values[2][i * maskSize + ii]);
@@ -275,23 +286,17 @@
           toggleCell(i, ii);
         }
       }
-      rotation = values[3];
-      detThresh = values[4];
-      iouThresh = values[5];
-      fpChange = values[6];
-      fpCount = values[7];
-      jpegQuality = values[8];
+      rotation    = clamp(values[3], 0, 270);
+      detThresh   = clamp(values[4], 0, 100);
+      iouThresh   = clamp(values[5], 0, 100);
+      fpChange    = clamp(values[6], 0, 100);
+      fpCount     = clamp(values[7], 0, 100);
+      jpegQuality = clamp(values[8], 5, 100);
 
-      document.getElementById("mask-size").value = maskSize;
-      document.getElementById("mask-thresh").value = maskThresh;
-      document.getElementById("image-rotation").value = rotation;
-      document.getElementById("det-thresh").value = detThresh;
-      document.getElementById("iou-thresh").value = iouThresh;
-      document.getElementById("fp-change").value = fpChange;
-      document.getElementById("fp-count").value = fpCount;
-      document.getElementById("jpeg-quality").value = jpegQuality;
+      updateElements()
     }
 
+    //load configuration from device
     function loadConfig() {
       getData(configLoadUrl, false)
         .then(config => {
@@ -301,7 +306,8 @@
         .catch(error => console.error("Failed to load config: ", error));
     }
 
-    function buildCsvString() {
+    //Build csv from local configuration
+    function csvFromConfig() {
       let maskVal = "";
       mask.val.forEach(row => {
         row.forEach(item => {
@@ -320,22 +326,25 @@
       return csv;
     }
 
+    //Send and save current configuration to device
     function saveConfig() {
-      maskSize = document.getElementById("mask-size").value;
-      maskThresh = document.getElementById("mask-thresh").value;
-      rotation = document.getElementById("image-rotation").value;
-      detThresh = document.getElementById("det-thresh").value;
-      iouThresh = document.getElementById("iou-thresh").value;
-      fpChange = document.getElementById("fp-change").value;
-      fpCount = document.getElementById("fp-count").value;
-      jpegQuality = document.getElementById("jpeg-quality").value;
+      maskSize    = clamp(document.getElementById("mask-size").value,      2, 80);
+      maskThresh  = clamp(document.getElementById("mask-thresh").value,    0, 100);
+      rotation    = clamp(document.getElementById("image-rotation").value, 0, 270);
+      detThresh   = clamp(document.getElementById("det-thresh").value,     0, 100);
+      iouThresh   = clamp(document.getElementById("iou-thresh").value,     0, 100);
+      fpChange    = clamp(document.getElementById("fp-change").value,      0, 100);
+      fpCount     = clamp(document.getElementById("fp-count").value,       0, 100);
+      jpegQuality = clamp(document.getElementById("jpeg-quality").value,   5, 100);
+      updateElements();
 
-      var csv = buildCsvString();
+      var csv = csvFromConfig();
       postData(configSaveUrl, "text/plain", csv)
         .then(console.log("Config saved:", csv))
         .catch(error => console.error("Failed to save config: ", error));
     }
 
+    //Request config reset from device
     function resetConfig() {
       getData(configResetUrl, false)
         .then(config => {
@@ -345,8 +354,9 @@
         .catch(error => console.error("Failed to reset load config: ", error));
     }
 
+    //Download local config to file as csv
     function downloadConfig() {
-      var csv = buildCsvString();
+      var csv = csvFromConfig();
       var blob = new Blob([csv], { type: "text/plain" }); //Create a blob with the text
       var a = document.createElement("a");                 //Create an anchor element and set the URL to the blob
       a.href = URL.createObjectURL(blob);
@@ -356,6 +366,7 @@
       document.body.removeChild(a);                        //Clean up by removing the element
     }
 
+    //Upload a csv file as config
     function uploadConfig() {
       var fileInput = document.getElementById("file-input");
       var file = fileInput.files[0]; //Get the file
@@ -380,20 +391,20 @@
     //Function to toggle cells
     function toggleCell(i, j) {
       if (toggleDir)
-        mask.elem[i][j].classList.add("toggled");//cell.classList.add("toggled");
+        mask.elem[i][j].classList.add("toggled");
       else
-        mask.elem[i][j].classList.remove("toggled");//cell.classList.remove("toggled");
+        mask.elem[i][j].classList.remove("toggled");
 
       mask.val[i][j] = toggleDir;
     }
 
-
+    //Un/Hide the mask
     function toggleMask() {
-      var grid = document.getElementById("gridCanvas");
-      if (grid.style.display == "none")
-        grid.style.display = "block"; //The grid was hidden, now show it
+      var mask = document.getElementById("gridCanvas");
+      if (mask.style.display == "none")
+        mask.style.display = "block"; //The mask was hidden, now show it
       else
-        grid.style.display = "none"; //The grid is visible, now hide it
+        mask.style.display = "none"; //The mask is visible, now hide it
     }
 
     function resetMask() {
@@ -406,12 +417,13 @@
     }
 
     function resizeMask() {
-      maskSize = document.getElementById("mask-size").value;
+      maskSize = clamp(document.getElementById("mask-size").value, 2, 80);
+      updateElements();
       createMask();
       resetMask();
     }
 
-    //Function to create grid cells
+    //Function to create mask cells
     function createMask() {
       const gridCanvas = document.getElementById("gridCanvas");
 
@@ -463,16 +475,14 @@
       mouseIsDown = false;
       let cells = document.getElementsByClassName("cell");
       for (let cell of cells)
-        cell.dataset.toggled = false; //Reset all cells" state
+        cell.dataset.toggled = false; //Reset all cells state
     });
 
 
     function resizePreview() {
-      previewSize = document.getElementById("preview-size").value;
-      if (previewSize < 200) {
-        previewSize = 200;
-        document.getElementById("preview-size").value = 200;
-      }
+      previewSize = clamp(document.getElementById("preview-size").value, 200, 1000);
+      updateElements();
+
       document.getElementById("gridCanvas").style.width = previewSize + "px";
       document.getElementById("gridCanvas").style.height = previewSize + "px";
       document.getElementById("stream").width = previewSize;
@@ -503,9 +513,9 @@
           imgElem.height = previewSize;
 
           //Get the last byte as status
-          let extraByteView = new DataView(arrayBuffer);
-          let extraByteSigned = extraByteView.getInt8(arrayBuffer.byteLength - 1);
-          document.getElementById("status-field").value = extraByteSigned;
+          let statusView = new DataView(arrayBuffer);
+          let status = statusView.getInt8(arrayBuffer.byteLength - 1);
+          document.getElementById("status-field").value = status;
         } catch (reason) {
           console.error("Error while fetching image: " + reason.toString());
         }
@@ -518,9 +528,6 @@
     function sleep(ms) {
       return new Promise((resolve) => setTimeout(resolve, ms));
     }
-
-    //Call createGrid on page load
-    //window.onload = createGrid;
   </script>
 
 </body>
