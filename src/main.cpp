@@ -425,6 +425,7 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
         count  = tflite::GetTensorData<float>(interpreter->output_tensor(3));
     }
 
+    int ret_type = 0;
     bbox_vector_t tmp_results;
     results->clear();
     size_t cnt = static_cast<int>(count[0]);
@@ -448,11 +449,13 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
 
         if (config.min_as_area) {
             if (config.min_width * config.min_height > (bbox.xmax - bbox.xmin) * (bbox.ymax - bbox.ymin))
-                continue;
+                bbox.type = 1;
+                ret_type = 1;
         }
         else {
             if (config.min_width > (bbox.xmax - bbox.xmin) || config.min_height > (bbox.ymax - bbox.ymin))
-                continue;
+                bbox.type = 1;
+                ret_type = 1;
         }
 
         tmp_results.push_back(bbox);
@@ -463,24 +466,26 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
         results->clear();
         if (consec_unmasked > 0)
             consec_unmasked--;
-        return consec_unmasked > 0 ? 2 : 0;
+        return consec_unmasked > 0 ? 3 : 0; //>0 || nothing
     }
 
     //single object detected
     if (tmp_results.size() == 1) {
         //change type if unmasked
-        if (!isBBoxMasked(tmp_results[0], config.mask, config.mask_size, gl_image_size, mask_thresh)) {
+        if (!tmp_results[0].type && !isBBoxMasked(tmp_results[0], config.mask, config.mask_size, gl_image_size, mask_thresh)) {
             if (consec_unmasked < 5)
                 consec_unmasked++;
-            tmp_results[0].type = consec_unmasked < 3 ? 1 : 2;
+            tmp_results[0].type = consec_unmasked < 3 ? 2 : 3; //unmasked && (<3/5 || >=3/5)
             *results = tmp_results;
-            return consec_unmasked < 3 ? 2 : 3;
+            return consec_unmasked < 3 ? 3 : 4; //unmasked && (<3/5 || >=3/5)
         }
         //decrease if masked
         if (consec_unmasked > 0)
             consec_unmasked--;
         *results = tmp_results;
-        return consec_unmasked > 0 ? 2 : 1;
+        if (!ret_type)
+            return consec_unmasked > 0 ? 3 : 2; //>0 || masked
+        return 1;                               //|| too small
     }
 
     // order indices to the tmp_results from highest to lowest scores
@@ -514,14 +519,14 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
         }
 
         //check if box is not masked and update consecutive detection counter and pick right type
-        if (!isBBoxMasked(current_box, config.mask, config.mask_size, gl_image_size, mask_thresh)) {
+        if (!current_box.type && !isBBoxMasked(current_box, config.mask, config.mask_size, gl_image_size, mask_thresh)) {
             //unmasked box -> increase conscutive detection (but only once, since it is per frame)
             if (!once) {
                 once = true;
                 if (consec_unmasked < 5)
                     consec_unmasked++;
             }
-            current_box.type = consec_unmasked <= 3 ? 1 : 2;
+            current_box.type = consec_unmasked <= 3 ? 2 : 3; // <3/5 || >= 3/5
         }
         results->push_back(current_box);
     }
@@ -532,9 +537,9 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
 
     //something is detected, but it is masked for too many frames
     if (!consec_unmasked)
-        return 1;
+        return ret_type ? 1 : 2; //too small || masked
     else
-        return consec_unmasked > 0 ? 2 : 0;
+        return consec_unmasked > 0 ? 3 : ret_type; // >0 || too small || nothing
 }
 
 
@@ -637,8 +642,9 @@ HttpServer::Content UriHandler(const char* uri) {
         for (size_t i = 0; i < gl_bboxes.size(); i++) {
             switch (gl_bboxes[i].type) {
                 case 0: drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 0,     0, 255); break;
-                case 1: drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 255, 255,   0); break;
-                case 2: drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 0,   255,   0); break;
+                case 1: drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 255,   0,   0); break;
+                case 2: drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 255, 255,   0); break;
+                case 3: drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 0,   255,   0); break;
             }
         }
 

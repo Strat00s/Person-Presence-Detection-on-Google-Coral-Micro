@@ -30,7 +30,9 @@
 [] Test other models
 [] Better error handling on webpage
 [X] Ignore bboxes that are too small
-    [] Add new status (red box) if something is too small but was detected
-    [] do not update when something small is detected
+    [X] Add new status (red box) if something is too small but was detected
+    [X] do not update when something small is detected
+[] Custom watchdog
+
 
 [] logging (to uart and web)
