@@ -62,6 +62,11 @@ using namespace std;
 #define PIN0 kSpiCs
 #define PIN1 kSpiSck
 
+#define BBOX_SMALL    1
+#define BBOX_MASKED   2
+#define BBOX_UNSURE   3
+#define BBOX_UNMASKED 4
+
 /*----(DEFAULT VALUES)----*/
 #define DEFAULT_IMAGE_SIZE   320
 #define DEFAULT_MASK_SIZE    32
@@ -425,7 +430,7 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
         count  = tflite::GetTensorData<float>(interpreter->output_tensor(3));
     }
 
-    int ret_type = 0;
+    int ret = 0;
     bbox_vector_t tmp_results;
     results->clear();
     size_t cnt = static_cast<int>(count[0]);
@@ -440,7 +445,7 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
             .xmax  = std::max(0.0f, std::round(bboxes[4 * i + 3] * gl_image_size)),
             .ymax  = std::max(0.0f, std::round(bboxes[4 * i + 2] * gl_image_size)),
             .score = std::round(scores[i] * 100),
-            .type  = 0
+            .type  = BBOX_MASKED
         };
         if (bbox.xmax >= gl_image_size)
             bbox.xmax = gl_image_size - 1;
@@ -448,44 +453,51 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
             bbox.ymax = gl_image_size - 1;
 
         if (config.min_as_area) {
-            if (config.min_width * config.min_height > (bbox.xmax - bbox.xmin) * (bbox.ymax - bbox.ymin))
-                bbox.type = 1;
-                ret_type = 1;
+            if (config.min_width * config.min_height > (bbox.xmax - bbox.xmin) * (bbox.ymax - bbox.ymin)) {
+                bbox.type = BBOX_SMALL;
+                ret = BBOX_SMALL;
+                }
         }
         else {
-            if (config.min_width > (bbox.xmax - bbox.xmin) || config.min_height > (bbox.ymax - bbox.ymin))
-                bbox.type = 1;
-                ret_type = 1;
+            if (config.min_width > (bbox.xmax - bbox.xmin) || config.min_height > (bbox.ymax - bbox.ymin)) {
+                bbox.type = BBOX_SMALL;
+                ret = BBOX_SMALL;
+                }
         }
 
         tmp_results.push_back(bbox);
     }
+
+    printf("%d %d\n", tmp_results.size(), ret);
 
     //nothing valid detected
     if (!tmp_results.size()) {
         results->clear();
         if (consec_unmasked > 0)
             consec_unmasked--;
-        return consec_unmasked > 0 ? 3 : 0; //>0 || nothing
+        ret = consec_unmasked > 0 ? BBOX_UNSURE : 0;
+        return ret; //>0 || nothing
     }
 
     //single object detected
     if (tmp_results.size() == 1) {
         //change type if unmasked
-        if (!tmp_results[0].type && !isBBoxMasked(tmp_results[0], config.mask, config.mask_size, gl_image_size, mask_thresh)) {
+        if (tmp_results[0].type != BBOX_SMALL && !isBBoxMasked(tmp_results[0], config.mask, config.mask_size, gl_image_size, mask_thresh)) {
             if (consec_unmasked < 5)
                 consec_unmasked++;
-            tmp_results[0].type = consec_unmasked < 3 ? 2 : 3; //unmasked && (<3/5 || >=3/5)
+            tmp_results[0].type = consec_unmasked >= 3 ? BBOX_UNMASKED : BBOX_UNSURE; //>=3/5 || > 0
             *results = tmp_results;
-            return consec_unmasked < 3 ? 3 : 4; //unmasked && (<3/5 || >=3/5)
+            return tmp_results[0].type;
         }
+
         //decrease if masked
         if (consec_unmasked > 0)
             consec_unmasked--;
         *results = tmp_results;
-        if (!ret_type)
-            return consec_unmasked > 0 ? 3 : 2; //>0 || masked
-        return 1;                               //|| too small
+        //if big enough
+        if (!ret)
+            ret = consec_unmasked > 0 ? BBOX_UNSURE : BBOX_MASKED; //>0 || masked
+        return ret;
     }
 
     // order indices to the tmp_results from highest to lowest scores
@@ -513,20 +525,19 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
         }
 
         //ignore boxes with not enough change
-        if (!hasBBoxChanged(image, background, gl_image_size, current_box, fp_change, fp_count)) {
-            //printf("False positive %d\n");
+        if (!hasBBoxChanged(image, background, gl_image_size, current_box, fp_change, fp_count))
             continue;
-        }
 
         //check if box is not masked and update consecutive detection counter and pick right type
-        if (!current_box.type && !isBBoxMasked(current_box, config.mask, config.mask_size, gl_image_size, mask_thresh)) {
+        if (current_box.type != BBOX_SMALL && !isBBoxMasked(current_box, config.mask, config.mask_size, gl_image_size, mask_thresh)) {
             //unmasked box -> increase conscutive detection (but only once, since it is per frame)
             if (!once) {
                 once = true;
                 if (consec_unmasked < 5)
                     consec_unmasked++;
+                ret = consec_unmasked >= 3 ? BBOX_UNMASKED : BBOX_UNSURE;
             }
-            current_box.type = consec_unmasked <= 3 ? 2 : 3; // <3/5 || >= 3/5
+            current_box.type = consec_unmasked >= 3 ? BBOX_UNMASKED : BBOX_UNSURE; //>= 3/5 || > 0
         }
         results->push_back(current_box);
     }
@@ -535,11 +546,10 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
     if (!once && consec_unmasked > 0)
         consec_unmasked--;
 
-    //something is detected, but it is masked for too many frames
-    if (!consec_unmasked)
-        return ret_type ? 1 : 2; //too small || masked
-    else
-        return consec_unmasked > 0 ? 3 : ret_type; // >0 || too small || nothing
+    //either nothing, too small or masked
+    if (ret < BBOX_UNSURE)
+        ret = consec_unmasked ? BBOX_MASKED : ret;
+    return ret;
 }
 
 
@@ -614,9 +624,9 @@ static void detectTask(void *args) {
         xSemaphoreGive(sync_sem);   //sync with web task (if it is waiting for us)
 
         //toggle led and pins of detection
-        LedSet(Led::kUser, gl_status > 1);
-        GpioSet(PIN0, gl_status & 0b00000001);
-        GpioSet(PIN1, gl_status > 1);
+        LedSet(Led::kUser, gl_status > 2);
+        GpioSet(PIN0, gl_status < 3 && gl_status > 1);
+        GpioSet(PIN1, gl_status > 2);
 
         //update background
         bckg_upd_cnt = gl_status ? 0 : bckg_upd_cnt + 1;
@@ -641,10 +651,10 @@ HttpServer::Content UriHandler(const char* uri) {
         xSemaphoreTake(data_mux, portMAX_DELAY);
         for (size_t i = 0; i < gl_bboxes.size(); i++) {
             switch (gl_bboxes[i].type) {
-                case 0: drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 0,     0, 255); break;
-                case 1: drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 255,   0,   0); break;
-                case 2: drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 255, 255,   0); break;
-                case 3: drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 0,   255,   0); break;
+                case BBOX_SMALL:    drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 255,   0,   0); break;
+                case BBOX_MASKED:   drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 0,     0, 255); break;
+                case BBOX_UNSURE:   drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 255, 255,   0); break;
+                case BBOX_UNMASKED: drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 0,   255,   0); break;
             }
         }
 

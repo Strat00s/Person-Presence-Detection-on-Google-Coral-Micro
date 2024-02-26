@@ -25,9 +25,9 @@
 [O] detect brightness change
 [X] UI???
 [X] Run when ethernet fails
-[] Test pin output
+[X] Test pin output
 [X] ~~Reinit EDGEtpu on failure?~~ Just restart...
-[] Test other models
+[X] Test other models - none of them work for some reason
 [] Better error handling on webpage
 [X] Ignore bboxes that are too small
     [X] Add new status (red box) if something is too small but was detected
