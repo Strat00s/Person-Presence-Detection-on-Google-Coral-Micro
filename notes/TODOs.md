@@ -35,4 +35,3 @@
 [] Custom watchdog
 
 
-[] logging (to uart and web)

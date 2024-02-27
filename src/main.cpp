@@ -81,13 +81,14 @@ using namespace std;
 #define DEFAULT_MIN_HEIGHT   0
 #define DEFAULT_MIN_AS_AREA  false
 
-#define TENSOR_ARENA_SIZE     8 * 1024 * 1024
-STATIC_TENSOR_ARENA_IN_SDRAM(tensor_arena, TENSOR_ARENA_SIZE);
+#define TENSOR_ARENA_SIZE     5700000 //enough from testing
+STATIC_TENSOR_ARENA_IN_SDRAM(tensor_arena, TENSOR_ARENA_SIZE); //OCRAM is too small for this
 
 
 /*----(TFLITE MICRO)----*/
+//must be global for some reason
 tflite::MicroMutableOpResolver<3> resolver;
-tflite::MicroInterpreter *interpreter; //must be created and configured in the main task for some reason
+tflite::MicroInterpreter *interpreter;
 tflite::MicroErrorReporter error_reporter;
 
 /*----(SHARED GLOBAL VARIABLES)----*/
@@ -392,8 +393,8 @@ float IoU(const bbox_t& a, const bbox_t& b) {
 /** @brief Get results from inference.
  * 1. get all bboxes with person id
  * 2. NMS
- * 3. calculate masked and detected
- * 3. calculate change against background
+ * 3. Check which boxes are masked
+ * 3. Calculate change against background
  * 
  * @param results vector where to store resulting bboxes
  * @param interpreter tflite interpreter
@@ -415,20 +416,12 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
     float fp_change   = config.fp_change   / 100.0f;
     float fp_count    = config.fp_count    / 100.0f;
     float mask_thresh = config.mask_thresh / 100.0f;
+
     //get data from output tensor
-    float *bboxes, *ids, *scores, *count;
-    if (interpreter->output_tensor(2)->dims->size == 1) {
-        scores = tflite::GetTensorData<float>(interpreter->output_tensor(0));
-        bboxes = tflite::GetTensorData<float>(interpreter->output_tensor(1));
-        count  = tflite::GetTensorData<float>(interpreter->output_tensor(2));
-        ids    = tflite::GetTensorData<float>(interpreter->output_tensor(3));
-    }
-    else {
-        bboxes = tflite::GetTensorData<float>(interpreter->output_tensor(0));
-        ids    = tflite::GetTensorData<float>(interpreter->output_tensor(1));
-        scores = tflite::GetTensorData<float>(interpreter->output_tensor(2));
-        count  = tflite::GetTensorData<float>(interpreter->output_tensor(3));
-    }
+    float *bboxes = tflite::GetTensorData<float>(interpreter->output_tensor(0));
+    float *ids    = tflite::GetTensorData<float>(interpreter->output_tensor(1));
+    float *scores = tflite::GetTensorData<float>(interpreter->output_tensor(2));
+    float *count  = tflite::GetTensorData<float>(interpreter->output_tensor(3));
 
     int ret = 0;
     bbox_vector_t tmp_results;
@@ -455,20 +448,18 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
         if (config.min_as_area) {
             if (config.min_width * config.min_height > (bbox.xmax - bbox.xmin) * (bbox.ymax - bbox.ymin)) {
                 bbox.type = BBOX_SMALL;
-                ret = BBOX_SMALL;
-                }
+                ret       = BBOX_SMALL;
+            }
         }
         else {
             if (config.min_width > (bbox.xmax - bbox.xmin) || config.min_height > (bbox.ymax - bbox.ymin)) {
                 bbox.type = BBOX_SMALL;
-                ret = BBOX_SMALL;
-                }
+                ret       = BBOX_SMALL;
+            }
         }
 
         tmp_results.push_back(bbox);
     }
-
-    printf("%d %d\n", tmp_results.size(), ret);
 
     //nothing valid detected
     if (!tmp_results.size()) {
