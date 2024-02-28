@@ -547,7 +547,6 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
 //Main detect task
 static void detectTask(void *args) {
     int ret;
-    int clean = 0;
     int bckg_upd_cnt = 0;
 
     gl_status = 0;
@@ -721,16 +720,16 @@ extern "C" [[noreturn]] void app_main(void* param) {
     GpioSetMode(PIN1, GpioMode::kOutput);
 
     config_mux = xSemaphoreCreateMutex();
-    data_mux = xSemaphoreCreateMutex();
-    sync_sem = xSemaphoreCreateBinary();
+    data_mux   = xSemaphoreCreateMutex();
+    sync_sem   = xSemaphoreCreateBinary();
 
-    vTaskDelay(5000); //TODO remove
+    vTaskDelay(2000);
 
     auto reset_stats = ResetGetStats();
     printf("Reset stats:\n");
-    printf("  Reason:     %d\n", reset_stats.reset_reason);
-    printf("  wdog cnt:   %d\n", reset_stats.watchdog_resets);
-    printf("  lockup cnt: %d\n", reset_stats.lockup_resets);
+    printf("  Reason:     %ld\n", reset_stats.reset_reason);
+    printf("  wdog cnt:   %ld\n", reset_stats.watchdog_resets);
+    printf("  lockup cnt: %ld\n", reset_stats.lockup_resets);
 
     //TODO custom tighter watchdog
     WatchdogStart({
@@ -741,13 +740,12 @@ extern "C" [[noreturn]] void app_main(void* param) {
 
     //load config
     std::string csv = readConfigFile();
-    printf("%s\n", csv.c_str());
     //empty/non-existant file or malformed csv
     if (!csv.size() || !configFromCsv(csv, &gl_config)) {
         gl_config = buildDefaultConfig();
         if (!writeConfigFile(csvFromConfig(gl_config))) {
             printf("Failed to write config file\n");
-            vTaskDelay(1000);
+            vTaskDelay(500);
             ResetToFlash();
         }
         printf("Config regenerated\n");
