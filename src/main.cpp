@@ -544,9 +544,13 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
 }
 
 
+int gl_inference_time  = 0;
+int gl_camera_time     = 0;
+int gl_extraction_time = 0;
 //Main detect task
 static void detectTask(void *args) {
     int ret;
+    int clean = 0;
     int bckg_upd_cnt = 0;
 
     gl_status = 0;
@@ -583,8 +587,10 @@ static void detectTask(void *args) {
             vTaskDelay(500);
             ResetToFlash();
         }
-        
+        gl_camera_time = xTaskGetTickCount() - ticks;
+
         // run model
+        int inference_ticks = xTaskGetTickCount();
         if (interpreter->Invoke() != kTfLiteOk) {
             printf("Invoke failed\n");
             gl_status = -2;
@@ -592,6 +598,7 @@ static void detectTask(void *args) {
             vTaskDelay(500);
             ResetToFlash();
         }
+        gl_inference_time = xTaskGetTickCount() - inference_ticks;
 
         if (gl_update_config) {
             xSemaphoreTake(config_mux, portMAX_DELAY);
@@ -608,8 +615,10 @@ static void detectTask(void *args) {
 
         //get results from inference and update global variables
         xSemaphoreTake(data_mux, portMAX_DELAY);
+        int extract_time = xTaskGetTickCount();
         gl_image = image_vector_t(tensor_input, tensor_input + IMAGE_SIZE);
         gl_status = getResults(&gl_bboxes, interpreter, gl_image, background, config);
+        gl_extraction_time = xTaskGetTickCount() - extract_time;
         xSemaphoreGive(data_mux);
         xSemaphoreGive(sync_sem);   //sync with web task (if it is waiting for us)
 
@@ -638,22 +647,29 @@ HttpServer::Content UriHandler(const char* uri) {
 
     else if (StrEndsWith(uri, STREAM_WEB_PATH)) {
         xSemaphoreTake(sync_sem, portMAX_DELAY);
-        xSemaphoreTake(data_mux, portMAX_DELAY);
+        //xSemaphoreTake(data_mux, portMAX_DELAY);
+        MutexLock lock(data_mux);
+        std::string csv = std::to_string(gl_status) + ',';
+        csv += std::to_string(gl_camera_time)     + ',';
+        csv += std::to_string(gl_inference_time)  + ',';
+        csv += std::to_string(gl_extraction_time) + ',';
+        csv += std::to_string(gl_bboxes.size())   + ',';
         for (size_t i = 0; i < gl_bboxes.size(); i++) {
-            switch (gl_bboxes[i].type) {
-                case BBOX_SMALL:    drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 255,   0,   0); break;
-                case BBOX_MASKED:   drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 0,     0, 255); break;
-                case BBOX_UNSURE:   drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 255, 255,   0); break;
-                case BBOX_UNMASKED: drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 0,   255,   0); break;
-            }
+            csv += std::to_string(gl_bboxes[i].score) + ';';
+            csv += std::to_string(gl_bboxes[i].type)  + ';';
+            csv += std::to_string(gl_bboxes[i].xmax)  + ';';
+            csv += std::to_string(gl_bboxes[i].ymax)  + ';';
+            csv += std::to_string(gl_bboxes[i].xmin)  + ';';
+            csv += std::to_string(gl_bboxes[i].ymin)  + ';';
         }
+        csv += ",";
 
-        //not raw jpeg. Last byte is detection gl_status
-        image_vector_t jpeg;
-        JpegCompressRgb(gl_image.data(), gl_image_size, gl_image_size, gl_config.jpeg_quality, &jpeg);
-        jpeg.push_back(gl_status);
-        xSemaphoreGive(data_mux);
-        return jpeg;
+        std::vector<uint8_t> result(csv.begin(), csv.end());
+        result.reserve(result.size() + gl_image.size());
+        for (size_t i = 0; i < gl_image.size(); i++)
+            result.push_back(gl_image[i]);
+        
+        return result;
     }
 
     else if (StrEndsWith(uri, DETECTION_STATUS_WEB_PATH)) {
@@ -720,10 +736,10 @@ extern "C" [[noreturn]] void app_main(void* param) {
     GpioSetMode(PIN1, GpioMode::kOutput);
 
     config_mux = xSemaphoreCreateMutex();
-    data_mux   = xSemaphoreCreateMutex();
-    sync_sem   = xSemaphoreCreateBinary();
+    data_mux = xSemaphoreCreateMutex();
+    sync_sem = xSemaphoreCreateBinary();
 
-    vTaskDelay(2000);
+    vTaskDelay(5000); //TODO remove
 
     auto reset_stats = ResetGetStats();
     printf("Reset stats:\n");
@@ -740,12 +756,13 @@ extern "C" [[noreturn]] void app_main(void* param) {
 
     //load config
     std::string csv = readConfigFile();
+    printf("%s\n", csv.c_str());
     //empty/non-existant file or malformed csv
     if (!csv.size() || !configFromCsv(csv, &gl_config)) {
         gl_config = buildDefaultConfig();
         if (!writeConfigFile(csvFromConfig(gl_config))) {
             printf("Failed to write config file\n");
-            vTaskDelay(500);
+            vTaskDelay(1000);
             ResetToFlash();
         }
         printf("Config regenerated\n");

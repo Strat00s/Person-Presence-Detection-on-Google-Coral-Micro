@@ -109,14 +109,16 @@
       <input type="number" id="jpeg-quality" name="jpeg-quality" size="3" maxlength="3" min="5" max="100">
       <label for="preview-size">Preview size:</label>
       <div class="input-wrapper">
-        <input type="number" id="preview-size" name="preview-size" onchange="resizePreview()" size="4" maxlength="4" min="200" max="1000">
+        <input type="number" id="preview-size" name="preview-size" onchange="resizePreview()" size="4" maxlength="4"
+          min="200" max="1000">
         <span>px</span>
       </div>
     </div>
 
     <div class="config-group">
       <label for="mask-size">Mask size:</label>
-      <input type="number" id="mask-size" name="mask-size" onchange="resizeMask()" size="3" maxlength="3" min="2" max="80">
+      <input type="number" id="mask-size" name="mask-size" onchange="resizeMask()" size="3" maxlength="3" min="2"
+        max="80">
 
       <label for="mask-thresh">Uncovered threshold:</label>
       <div class="input-wrapper">
@@ -192,28 +194,28 @@
 
 
   <script>
-    const imgUrl         = "/camera_stream"; //get
-    const configSaveUrl  = "/config_save"; //get set
-    const configLoadUrl  = "/config_load"; //get set
+    const imgUrl = "/camera_stream"; //get
+    const configSaveUrl = "/config_save"; //get set
+    const configLoadUrl = "/config_load"; //get set
     const configResetUrl = "/config_reset";
-    const statusUrl      = "/detection_status";
+    const statusUrl = "/detection_status";
 
     var previewSize = 500;
-    var maskSize    = 32; //current mask size (cell count per dimension)
-    var maskThresh  = 50;
-    var rotation    = 270;
-    var detThresh   = 50;
-    var iouThresh   = 50;
-    var fpChange    = 0;
-    var fpCount     = 0;
+    var maskSize = 32; //current mask size (cell count per dimension)
+    var maskThresh = 50;
+    var rotation = 270;
+    var detThresh = 50;
+    var iouThresh = 50;
+    var fpChange = 0;
+    var fpCount = 0;
     var jpegQuality = 70;
-    var minWidth    = 0;
-    var minHeight   = 0;
-    var minAsArea   = false;
+    var minWidth = 0;
+    var minHeight = 0;
+    var minAsArea = false;
 
     var mask;
     var mouseIsDown = false; //Tracks if the mouse is pressed down
-    var toggleDir   = 0;
+    var toggleDir = 0;
 
 
     //start everything important on load
@@ -278,18 +280,18 @@
 
 
     function updateElements() {
-      document.getElementById("mask-size").value       = maskSize;
-      document.getElementById("mask-thresh").value     = maskThresh;
-      document.getElementById("image-rotation").value  = rotation;
-      document.getElementById("det-thresh").value      = detThresh;
-      document.getElementById("iou-thresh").value      = iouThresh;
-      document.getElementById("fp-change").value       = fpChange;
-      document.getElementById("fp-count").value        = fpCount;
-      document.getElementById("jpeg-quality").value    = jpegQuality;
-      document.getElementById("preview-size").value    = previewSize;
-      document.getElementById("min-width").value       = minWidth;
-      document.getElementById("min-height").value      = minHeight;
-      document.getElementById("min-as-area").checked   = minAsArea;
+      document.getElementById("mask-size").value = maskSize;
+      document.getElementById("mask-thresh").value = maskThresh;
+      document.getElementById("image-rotation").value = rotation;
+      document.getElementById("det-thresh").value = detThresh;
+      document.getElementById("iou-thresh").value = iouThresh;
+      document.getElementById("fp-change").value = fpChange;
+      document.getElementById("fp-count").value = fpCount;
+      document.getElementById("jpeg-quality").value = jpegQuality;
+      document.getElementById("preview-size").value = previewSize;
+      document.getElementById("min-width").value = minWidth;
+      document.getElementById("min-height").value = minHeight;
+      document.getElementById("min-as-area").checked = minAsArea;
     }
 
     //Update all required elements
@@ -306,15 +308,15 @@
           toggleCell(i, ii);
         }
       }
-      rotation    = clamp(Number(values[3]),  0, 270);
-      detThresh   = clamp(Number(values[4]),  0, 100);
-      iouThresh   = clamp(Number(values[5]),  0, 100);
-      fpChange    = clamp(Number(values[6]),  0, 100);
-      fpCount     = clamp(Number(values[7]),  0, 100);
-      jpegQuality = clamp(Number(values[8]),  5, 100);
-      minWidth    = clamp(Number(values[9]),  0, 320);
-      minHeight   = clamp(Number(values[10]), 0, 320);
-      minAsArea   = clamp(Number(values[11]), 0, 1) ? true : false;
+      rotation = clamp(Number(values[3]), 0, 270);
+      detThresh = clamp(Number(values[4]), 0, 100);
+      iouThresh = clamp(Number(values[5]), 0, 100);
+      fpChange = clamp(Number(values[6]), 0, 100);
+      fpCount = clamp(Number(values[7]), 0, 100);
+      jpegQuality = clamp(Number(values[8]), 5, 100);
+      minWidth = clamp(Number(values[9]), 0, 320);
+      minHeight = clamp(Number(values[10]), 0, 320);
+      minAsArea = clamp(Number(values[11]), 0, 1) ? true : false;
 
       updateElements()
     }
@@ -338,33 +340,33 @@
         })
       })
       var csv = maskSize.toString() + ",";
-      csv += maskThresh.toString()  + ",";
-      csv += maskVal                + ",";
-      csv += rotation.toString()    + ",";
-      csv += detThresh.toString()   + ",";
-      csv += iouThresh.toString()   + ",";
-      csv += fpChange.toString()    + ",";
-      csv += fpCount.toString()     + ",";
+      csv += maskThresh.toString() + ",";
+      csv += maskVal + ",";
+      csv += rotation.toString() + ",";
+      csv += detThresh.toString() + ",";
+      csv += iouThresh.toString() + ",";
+      csv += fpChange.toString() + ",";
+      csv += fpCount.toString() + ",";
       csv += jpegQuality.toString() + ',';
-      csv += minWidth.toString()    + ',';
-      csv += minHeight.toString()   + ',';
+      csv += minWidth.toString() + ',';
+      csv += minHeight.toString() + ',';
       csv += minAsArea ? '1' : '0';
       return csv;
     }
 
     //Send and save current configuration to device
     function saveConfig() {
-      maskSize    = clamp(document.getElementById("mask-size").value,      2, 80);
-      maskThresh  = clamp(document.getElementById("mask-thresh").value,    0, 100);
-      rotation    = clamp(document.getElementById("image-rotation").value, 0, 270);
-      detThresh   = clamp(document.getElementById("det-thresh").value,     0, 100);
-      iouThresh   = clamp(document.getElementById("iou-thresh").value,     0, 100);
-      fpChange    = clamp(document.getElementById("fp-change").value,      0, 100);
-      fpCount     = clamp(document.getElementById("fp-count").value,       0, 100);
-      jpegQuality = clamp(document.getElementById("jpeg-quality").value,   5, 100);
-      minWidth    = clamp(document.getElementById("min-width").value,      0, 320);
-      minHeight   = clamp(document.getElementById("min-height").value,     0, 320);
-      minAsArea   = document.getElementById("min-as-area").checked;
+      maskSize = clamp(document.getElementById("mask-size").value, 2, 80);
+      maskThresh = clamp(document.getElementById("mask-thresh").value, 0, 100);
+      rotation = clamp(document.getElementById("image-rotation").value, 0, 270);
+      detThresh = clamp(document.getElementById("det-thresh").value, 0, 100);
+      iouThresh = clamp(document.getElementById("iou-thresh").value, 0, 100);
+      fpChange = clamp(document.getElementById("fp-change").value, 0, 100);
+      fpCount = clamp(document.getElementById("fp-count").value, 0, 100);
+      jpegQuality = clamp(document.getElementById("jpeg-quality").value, 5, 100);
+      minWidth = clamp(document.getElementById("min-width").value, 0, 320);
+      minHeight = clamp(document.getElementById("min-height").value, 0, 320);
+      minAsArea = document.getElementById("min-as-area").checked;
       updateElements();
 
       var csv = csvFromConfig();
@@ -458,13 +460,13 @@
 
       //remove cells if there are any
       const cells = document.getElementsByClassName("cell");
-      while(cells.length) {
+      while (cells.length) {
         cells[0].parentNode.removeChild(cells[0]);
       }
 
       //create the mask
       mask = {
-        "val":  Array.from({ length: maskSize }, () => new Array(maskSize).fill(0)),
+        "val": Array.from({ length: maskSize }, () => new Array(maskSize).fill(0)),
         "elem": Array.from({ length: maskSize }, () => new Array(maskSize).fill(null))
       };
 
@@ -474,7 +476,7 @@
           const cell = document.createElement("div");
           cell.className = "cell";
           cell.dataset.toggled = false; //Custom attribute to track state
-          cell.style.width  = previewSize / maskSize + "px";
+          cell.style.width = previewSize / maskSize + "px";
           cell.style.height = previewSize / maskSize + "px";
 
           cell.addEventListener("mousedown", function (event) {
@@ -512,14 +514,14 @@
       previewSize = clamp(document.getElementById("preview-size").value, 200, 1000);
       updateElements();
 
-      document.getElementById("gridCanvas").style.width  = previewSize + "px";
+      document.getElementById("gridCanvas").style.width = previewSize + "px";
       document.getElementById("gridCanvas").style.height = previewSize + "px";
-      document.getElementById("stream").width  = previewSize;
+      document.getElementById("stream").width = previewSize;
       document.getElementById("stream").height = previewSize;
 
       var cells = document.getElementsByClassName("cell");
       for (var i = 0; i < cells.length; i++) {
-        cells[i].style.width  = previewSize / maskSize + "px";
+        cells[i].style.width = previewSize / maskSize + "px";
         cells[i].style.height = previewSize / maskSize + "px";
       }
     }
@@ -529,22 +531,99 @@
       while (1) {
         try {
           let arrayBuffer = await fetch(imgUrl).then(resp => resp.arrayBuffer()); //Get image with status
-          let jpegBuffer  = arrayBuffer.slice(0, arrayBuffer.byteLength - 1);      //Slice jpeg from the data
-          let imageBlob   = new Blob([jpegBuffer], { type: "image/jpeg" });
-          let imgElem     = document.getElementById("stream");
 
-          //Revoke the previous object URL to avoid memory leaks
-          if (imgElem.src.startsWith("blob:"))
-            URL.revokeObjectURL(imgElem.src);
+          let textDecoder = new TextDecoder("utf-8");
+          let textData = textDecoder.decode(arrayBuffer);
+          let splits = textData.split(",");
 
-          imgElem.src    = URL.createObjectURL(imageBlob);
-          imgElem.width  = previewSize;
-          imgElem.height = previewSize;
+          let status    = splits[0];
+          let cam_time  = splits[1];
+          let infr_time = splits[2];
+          let extr_time = splits[3];
+          let bbox_cnt  = splits[4];
+          let bboxes    = ""
+          let bbox_data = Array(0);
+          let bboxes_str = ""
+          if (bbox_cnt != "0") {
+            bboxes_str = splits[5];
+            bboxes = bboxes_str.substring(0, bboxes_str.length - 1);
+            bboxes = bboxes.split(";");
+            for (let i = 0; i < Number(bbox_cnt); i++) {
+              let score = Number(bboxes[i * 6 + 0]);
+              let type  = Number(bboxes[i * 6 + 1]);
+              let xmax  = Number(bboxes[i * 6 + 2]);
+              let ymax  = Number(bboxes[i * 6 + 3]);
+              let xmin  = Number(bboxes[i * 6 + 4]);
+              let ymin  = Number(bboxes[i * 6 + 5]);
+              bbox_data.push([score, type, xmax, ymax, xmin, ymin]);
+            }
+            console.log(bbox_data);
+          }
 
-          //Get the last byte as status
-          let statusView = new DataView(arrayBuffer);
-          let status = statusView.getInt8(arrayBuffer.byteLength - 1);
-          document.getElementById("status-field").value = status;
+          let csv_len = 6 + status.length + cam_time.length + infr_time.length + extr_time.length + bbox_cnt.length + bboxes_str.length;
+          
+          const rawImageData = arrayBuffer.slice(csv_len);      //Slice jpeg from the data
+          let imageWidth = 320;
+          let imageHeight = 320;
+          let imageDataArray = new Uint8ClampedArray(imageWidth * imageHeight * 4);
+          // Convert the RGB values to RGBA by adding an alpha value of 255 (fully opaque)
+          for (let i = 0, j = 0; i < arrayBuffer.byteLength - csv_len; i += 3, j += 4) {
+            imageDataArray[j] = new Uint8Array(rawImageData)[i];     // Red
+            imageDataArray[j + 1] = new Uint8Array(rawImageData)[i + 1]; // Green
+            imageDataArray[j + 2] = new Uint8Array(rawImageData)[i + 2]; // Blue
+            imageDataArray[j + 3] = 255; // Alpha (fully opaque)
+          }
+
+          // Prepare a canvas to draw the image
+          let canvas = document.createElement('canvas');
+          canvas.width = imageWidth;
+          canvas.height = imageHeight;
+          let ctx = canvas.getContext('2d');
+
+          // Create an ImageData object with the RGBA data and put it in the canvas
+          let imageData = new ImageData(imageDataArray, imageWidth, imageHeight);
+          ctx.putImageData(imageData, 0, 0);
+
+          for (let i = 0; i < bbox_data.length; i++) {
+            let color = "red";
+            switch (bbox_data[i][1]) {
+              case 1: color = "red";    break;
+              case 2: color = "blue";   break;
+              case 3: color = "yellow"; break;
+              case 4: color = "green";  break;
+            }
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 3;
+
+            let rectWidth  = bbox_data[i][2] - bbox_data[i][4];
+            let rectHeight = bbox_data[i][3] - bbox_data[i][5];
+            ctx.strokeRect(bbox_data[i][4], bbox_data[i][5], rectWidth, rectHeight);
+            ctx.fillStyle = color;
+            ctx.font = "16px Arial";
+            ctx.fillText(String(bbox_data[0][0]), bbox_data[i][4], bbox_data[i][5] - 5);
+          }
+
+          // Convert canvas to JPEG Blob
+          canvas.toBlob(function (blob) {
+            let imgElem = document.getElementById("stream");
+
+            // Revoke the previous object URL to avoid memory leaks
+            if (imgElem.src.startsWith('blob:'))
+              URL.revokeObjectURL(imgElem.src);
+
+            imgElem.src = URL.createObjectURL(blob);
+            imgElem.width = previewSize;
+            imgElem.height = previewSize;
+
+          }, 'image/jpeg');
+
+          console.log(status);
+          console.log(cam_time);
+          console.log(infr_time);
+          console.log(extr_time);
+          console.log(bbox_cnt);
+
+          document.getElementById("status-field").value = Number(status);
         } catch (reason) {
           console.error("Error while fetching image: " + reason.toString());
         }
