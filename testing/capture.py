@@ -63,7 +63,6 @@ def parse_data(data):
     # Convert the binary data to text for parsing
     text_decoder = decode_as_much_as_possible(data)
     splits = text_decoder.split(",")
-    print(text_decoder)
 
     # Extract the text data
     text_data = splits[0]  + "\n"
@@ -95,5 +94,5 @@ def save_image(image_data, filename):
     img = Image.fromarray(img_array, 'RGB')
     img.save(filename)
 # Replace 'your_uri_here' with your actual URI path
-uri = "http://192.168.1.112/camera_stream"
+uri = "http://192.168.2.2/camera_stream"
 fetch_and_save_data(uri)

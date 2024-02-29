@@ -429,7 +429,7 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
     size_t cnt = static_cast<int>(count[0]);
     for (int i = 0; i < cnt; ++i) {
         //skip object with id != 0 (not person) and below threshold
-        if (std::round(ids[i]) || scores[i] < det_thresh)
+        if (ids[i] >= 1 || scores[i] < det_thresh)
             continue;
 
         bbox_t bbox = {
@@ -460,6 +460,8 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
 
         tmp_results.push_back(bbox);
     }
+
+    printf("Prelimenary results: %d\n", tmp_results.size());
 
     //nothing valid detected
     if (!tmp_results.size()) {
