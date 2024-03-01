@@ -38,4 +38,9 @@ Problem are objects with long hair and same coloured
 Angle seems to be good enough
 Detectin much better if facing the camera
 
-Probably the best option so far..
+Probably the best option so far...
+
+Fish-eye/wide angle lens would help for sure
+Better comera too
+    slower inference and capture speed, but the quality would really help
+custom model specifically designed for the environment (scanner)
