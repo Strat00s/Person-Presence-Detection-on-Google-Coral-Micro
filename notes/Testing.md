@@ -21,3 +21,11 @@ Good enough illumination
 angle does not really matter here, as the camera is too close in general
 maybe moving it somewhat back would be better, but that does not seems to be possible/feasable
 
+### Side center
+##### Outside
+Too close
+##### Inside
+Still really close, but custom model might help with that
+Masks align well, but because subject is really close, unmasked part has to be really large
+cannot tell how close to any side subject is
+
