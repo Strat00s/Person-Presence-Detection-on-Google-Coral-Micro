@@ -29,3 +29,13 @@ Still really close, but custom model might help with that
 Masks align well, but because subject is really close, unmasked part has to be really large
 cannot tell how close to any side subject is
 
+
+### Side top middle
+Probably one of the best possitions
+Detects both direction without problem
+Problem are objects with long hair and same coloured
+
+Angle seems to be good enough
+Detectin much better if facing the camera
+
+Probably the best option so far..
