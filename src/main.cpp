@@ -126,6 +126,7 @@ void exit() {
 void reset() {
     printf("Restarting...\n");
     LedSet(Led::kStatus, false);
+    vTaskDelay(500);
     ResetToFlash();
 }
 
@@ -273,8 +274,8 @@ std::string readConfigFile() {
 
 /*----(MASK HANDLING)----*/
 // Helper function to check if the coordinates are inside the box.
-inline bool isInsideBox(int x, int y, int x_min, int x_max, int y_min, int y_max) {
-    return (x >= x_min && x <= x_max && y >= y_min && y <= y_max);
+inline bool isInsideBox(int x, int y, int xmin, int xmax, int ymin, int ymax) {
+    return (x >= xmin && x <= xmax && y >= ymin && y <= ymax);
 }
 
 /** @brief Check if enough bbox is masked
@@ -351,11 +352,11 @@ bool hasBBoxChanged(const image_vector_t &current_image, const image_vector_t &p
  * @return overlap ratio
  */
 float IoU(const bbox_t& a, const bbox_t& b) {
-    float intersectionArea = std::max(0, std::min(a.xmax, b.xmax) - std::max(a.xmin, b.xmin)) *
-                             std::max(0, std::min(a.ymax, b.ymax) - std::max(a.ymin, b.ymin));
-    float unionArea = (a.xmax - a.xmin) * (a.ymax - a.ymin) +
-                      (b.xmax - b.xmin) * (b.ymax - b.ymin) - intersectionArea;
-    return intersectionArea / unionArea;
+    float int_area = std::max(0, std::min(a.xmax, b.xmax) - std::max(a.xmin, b.xmin)) *
+                     std::max(0, std::min(a.ymax, b.ymax) - std::max(a.ymin, b.ymin));
+    float un_area = (a.xmax - a.xmin) * (a.ymax - a.ymin) +
+                    (b.xmax - b.xmin) * (b.ymax - b.ymin) - int_area;
+    return int_area / un_area;
 }
 
 /** @brief Get results from inference.
@@ -374,7 +375,7 @@ float IoU(const bbox_t& a, const bbox_t& b) {
  * 2 if something is/was detected and is/was unmasked in last 5 frames.
  * 3 if something is detected, is unmasked and is detected in the last 3 out of 5 frames.
  */
-int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpreter,
+int postprocessResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpreter,
                const image_vector_t &image, const image_vector_t &background, const cfg_struct_t &config) {
 
     static int consec_unmasked = 0; //keeps count of consecutive unmasked detections
@@ -519,10 +520,6 @@ int gl_camera_time     = 0;
 int gl_extraction_time = 0;
 //Main detect task
 static void detectTask(void *args) {
-    int ret;
-    int clean = 0;
-    int bckg_upd_cnt = 0;
-
     gl_status = 0;
     gl_image.resize(IMAGE_SIZE);
 
@@ -541,6 +538,8 @@ static void detectTask(void *args) {
         true
     };
 
+    int ret;
+    int bckg_upd_cnt = 0;
     int inference_time = 0;
 
     TickType_t last_wake_time;
@@ -554,8 +553,7 @@ static void detectTask(void *args) {
             printf("Failed to get image from camera.\r\n");
             gl_status = -1;
             xSemaphoreGive(sync_sem);
-            vTaskDelay(500);
-            ResetToFlash();
+            reset();
         }
         gl_camera_time = xTaskGetTickCount() - ticks;
 
@@ -565,8 +563,7 @@ static void detectTask(void *args) {
             printf("Invoke failed\n");
             gl_status = -2;
             xSemaphoreGive(sync_sem);
-            vTaskDelay(500);
-            ResetToFlash();
+            reset();
         }
         gl_inference_time = xTaskGetTickCount() - inference_ticks;
 
@@ -587,7 +584,7 @@ static void detectTask(void *args) {
         xSemaphoreTake(data_mux, portMAX_DELAY);
         int extract_time = xTaskGetTickCount();
         gl_image = image_vector_t(tensor_input, tensor_input + IMAGE_SIZE);
-        gl_status = getResults(&gl_bboxes, interpreter, gl_image, background, config);
+        gl_status = postprocessResults(&gl_bboxes, interpreter, gl_image, background, config);
         gl_extraction_time = xTaskGetTickCount() - extract_time;
         xSemaphoreGive(data_mux);
         xSemaphoreGive(sync_sem);   //sync with web task (if it is waiting for us)
@@ -610,8 +607,8 @@ static void detectTask(void *args) {
 }
 
 
-/*----(WEB HADNLING)----*/
-HttpServer::Content UriHandler(const char* uri) {
+/*----(REQUEST HANDLERS)----*/
+HttpServer::Content getUriHandler(const char* uri) {
     if (StrEndsWith(uri, "index.shtml") || StrEndsWith(uri, "index.html"))
         return std::string(MAIN_PAGE_RESPONSE);
 
@@ -706,10 +703,9 @@ extern "C" [[noreturn]] void app_main(void* param) {
     GpioSetMode(PIN1, GpioMode::kOutput);
 
     config_mux = xSemaphoreCreateMutex();
-    data_mux = xSemaphoreCreateMutex();
-    sync_sem = xSemaphoreCreateBinary();
+    data_mux   = xSemaphoreCreateMutex();
+    sync_sem   = xSemaphoreCreateBinary();
 
-    vTaskDelay(5000); //TODO remove
 
     auto reset_stats = ResetGetStats();
     printf("Reset stats:\n");
@@ -717,23 +713,22 @@ extern "C" [[noreturn]] void app_main(void* param) {
     printf("  wdog cnt:   %ld\n", reset_stats.watchdog_resets);
     printf("  lockup cnt: %ld\n", reset_stats.lockup_resets);
 
-    //TODO custom tighter watchdog
+
     WatchdogStart({
         .timeout_s = 2,
         .pet_rate_s = 1,
         .enable_irq = false
     });
 
+
     //load config
     std::string csv = readConfigFile();
-    printf("%s\n", csv.c_str());
     //empty/non-existant file or malformed csv
     if (!csv.size() || !configFromCsv(csv, &gl_config)) {
         gl_config = buildDefaultConfig();
         if (!writeConfigFile(csvFromConfig(gl_config))) {
             printf("Failed to write config file\n");
-            vTaskDelay(1000);
-            ResetToFlash();
+            reset();
         }
         printf("Config regenerated\n");
     }
@@ -746,7 +741,7 @@ extern "C" [[noreturn]] void app_main(void* param) {
     bool eth_succ = EthernetInit(true);
     if (!eth_succ) {
         printf("Failed to init ethernet\n");
-        ResetToFlash();
+        reset();
     }
     else {
         auto ip_addr = EthernetGetIp();
@@ -821,8 +816,8 @@ extern "C" [[noreturn]] void app_main(void* param) {
 
     //start http server
     PostHttpServer http_server;
-    http_server.registerPostUriHandler(postUriHandler);
-    http_server.AddUriHandler(UriHandler);
+    http_server.AddUriHandler(getUriHandler);
+    http_server.AddPostUriHandler(postUriHandler);
     UseHttpServer(&http_server);
 
     vTaskSuspend(nullptr);
