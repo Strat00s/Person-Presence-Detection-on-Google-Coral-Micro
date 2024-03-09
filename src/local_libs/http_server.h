@@ -90,10 +90,12 @@ class PostHttpServer : public HttpServer {
         struct pbuf* current_pbuf = p;
         while (current_pbuf != nullptr) {
             uint8_t *payload = static_cast<uint8_t *>(current_pbuf->payload);
-            payload_buffer[connection].payload.insert(payload_buffer[connection].payload.end(), &payload[0], &payload[current_pbuf->len - 1]);
+            payload_buffer[connection].payload.insert(payload_buffer[connection].payload.end(), &payload[0], &payload[current_pbuf->len]);
 
             current_pbuf = current_pbuf->next;
         }
+
+        pbuf_free(p);
 
         return ERR_OK;
     };

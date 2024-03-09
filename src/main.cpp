@@ -67,7 +67,6 @@ using namespace std;
 
 /*----(LOCAL FILES)----*/
 #define MODEL_PATH  "/model.tflite"
-#define CONFIG_PATH "/cfg.csv"
 #define NEW_CONFIG_PATH "/cfg.bin"
 
 #define PIN0 kSpiCs
@@ -93,7 +92,7 @@ using namespace std;
 #define DEFAULT_MIN_AS_AREA  false
 
 /*----(TENSOR ARENA)----*/
-#define TENSOR_ARENA_SIZE     5700000 //enough from testing
+#define TENSOR_ARENA_SIZE 5700000 //enough from testing
 STATIC_TENSOR_ARENA_IN_SDRAM(tensor_arena, TENSOR_ARENA_SIZE); //OCRAM is too small for this
 
 
@@ -233,28 +232,30 @@ bool configFromCsv(const string &csv, cfg_struct_t *config) {
     return true;
 }
 
-bool configFromRaw(std::vector<uint8_t> packet, cfg_struct_t *config) {
-    //invalid packet size check
-    if (packet.size() < 10 + 4 || packet.size() < 10 + packet[1] * packet[1])
+bool configFromRaw(std::vector<uint8_t> raw_data, cfg_struct_t *config) {
+    printf("raw_data len: %d\n", raw_data.size());
+    //raw config is smaller than minimun size
+    if (raw_data.size() < 10 + 4)
         return false;
     
-    int mask_size     = packet[0] * packet[0];
-    if (packet.size() < 10 + mask_size)
+    int mask_size     = raw_data[0] * raw_data[0];
+    //reported mask size does not match the raw config size
+    if (raw_data.size() != 10 + mask_size)
         return false;
 
-    config->mask_size   = packet[0];
-    config->mask_thresh = packet[1];
-    vector<uint8_t>::const_iterator first = packet.begin() + 2;
-    vector<uint8_t>::const_iterator last  = packet.begin() + 2 + mask_size;
+    config->mask_size   = raw_data[0];
+    config->mask_thresh = raw_data[1];
+    vector<uint8_t>::const_iterator first = raw_data.begin() + 2;
+    vector<uint8_t>::const_iterator last  = raw_data.begin() + 2 + mask_size;
     config->mask        = vector<uint8_t>(first, last);
-    config->rotation    = packet[mask_size + 3];
-    config->det_thresh  = packet[mask_size + 4];
-    config->iou_thresh  = packet[mask_size + 5];
-    config->fp_change   = packet[mask_size + 6];
-    config->fp_count    = packet[mask_size + 7];
-    config->min_width   = packet[mask_size + 8];
-    config->min_height  = packet[mask_size + 9];
-    config->min_as_area = packet[mask_size + 10];
+    config->rotation    = raw_data[mask_size + 3];
+    config->det_thresh  = raw_data[mask_size + 4];
+    config->iou_thresh  = raw_data[mask_size + 5];
+    config->fp_change   = raw_data[mask_size + 6];
+    config->fp_count    = raw_data[mask_size + 7];
+    config->min_width   = raw_data[mask_size + 8];
+    config->min_height  = raw_data[mask_size + 9];
+    config->min_as_area = raw_data[mask_size + 10];
 
     return true;
 }
@@ -282,22 +283,21 @@ string csvFromConfig(const cfg_struct_t &config) {
     return csv;
 }
 
-std::vector<uint8_t> createConfigPacket(const cfg_struct_t &config) {
-    std::vector<uint8_t> packet;
-    packet.push_back(config.mask_size);
-    packet.push_back(config.mask_thresh);
-    packet.insert(packet.end(), config.mask.begin(), config.mask.end());
-    packet.push_back(config.rotation);
-    packet.push_back(config.det_thresh);
-    packet.push_back(config.iou_thresh);
-    packet.push_back(config.fp_change);
-    packet.push_back(config.fp_count);
-    //packet.push_back(config.jpeg_quality);
-    packet.push_back(config.min_width);
-    packet.push_back(config.min_height);
-    packet.push_back(config.min_as_area);
+std::vector<uint8_t> configToRaw(const cfg_struct_t &config) {
+    std::vector<uint8_t> raw_data;
+    raw_data.push_back(config.mask_size);
+    raw_data.push_back(config.mask_thresh);
+    raw_data.insert(raw_data.end(), config.mask.begin(), config.mask.end());
+    raw_data.push_back(config.rotation);
+    raw_data.push_back(config.det_thresh);
+    raw_data.push_back(config.iou_thresh);
+    raw_data.push_back(config.fp_change);
+    raw_data.push_back(config.fp_count);
+    raw_data.push_back(config.min_width);
+    raw_data.push_back(config.min_height);
+    raw_data.push_back(config.min_as_area);
 
-    return packet;
+    return raw_data;
 }
 
 /** @brief Write csv config to file
@@ -309,9 +309,8 @@ bool writeConfigFile(const string &csv) {
     return LfsWriteFile(CONFIG_PATH, csv);
 }
 
-bool writeConfigToFile(const cfg_struct_t &config) {
-    auto packet = createConfigPacket(config);
-    return LfsWriteFile(NEW_CONFIG_PATH, packet.data(), packet.size());
+bool writeConfigToFile(const char *path, const std::vector<uint8_t> &raw_cfg) {
+    return LfsWriteFile(path, raw_cfg.data(), raw_cfg.size());
 }
 
 /** @brief Read csv config from file
@@ -325,11 +324,11 @@ string readConfigFile() {
     return config_csv;
 }
 
-vector<uint8_t> readConfigFromFile() {
-    vector<uint8_t> data;
-    if (!LfsReadFile(CONFIG_PATH, &data))
+vector<uint8_t> readConfigFromFile(const char *path) {
+    vector<uint8_t> raw_data;
+    if (!LfsReadFile(path, &raw_data))
         return {};
-    return data;
+    return raw_data;
 }
 
 
@@ -630,13 +629,7 @@ static void detectTask(void *args) {
             xSemaphoreTake(config_mux, portMAX_DELAY);
             config = gl_config;
             gl_update_config = false;
-            //frame.rotation = static_cast<coralmicro::CameraRotation>(gl_config.rotation);
-            switch (gl_config.rotation) {
-                case 0:   frame.rotation = CameraRotation::k0;   break;
-                case 90:  frame.rotation = CameraRotation::k90;  break;
-                case 180: frame.rotation = CameraRotation::k180; break;
-                case 270: frame.rotation = CameraRotation::k270; break;
-            }
+            frame.rotation = static_cast<coralmicro::CameraRotation>(gl_config.rotation);
             xSemaphoreGive(config_mux);
         }
 
@@ -675,6 +668,8 @@ HttpServer::Content getUriHandler(const char* uri) {
     else if (StrEndsWith(uri, STREAM_WEB_PATH)) {
         xSemaphoreTake(sync_sem, portMAX_DELAY);
         MutexLock lock(data_mux);
+
+        //create packet with status, results and image and send it
         std::vector<uint8_t> packet;
         packet.push_back(gl_status + 128);
         packet.push_back(gl_camera_time);
@@ -708,22 +703,21 @@ HttpServer::Content getUriHandler(const char* uri) {
     }
 
     else if (StrEndsWith(uri, CONFIG_LOAD_WEB_PATH)) {
-        xSemaphoreTake(config_mux, portMAX_DELAY);
-        string csv = csvFromConfig(gl_config);
-        xSemaphoreGive(config_mux);
-        return vector<uint8_t>(csv.begin(), csv.end());
+        MutexLock lock(config_mux);
+        return configToRaw(gl_config);
     }
 
     else if (StrEndsWith(uri, CONFIG_RESET_WEB_PATH)) {
         xSemaphoreTake(config_mux, portMAX_DELAY);
         gl_config = buildDefaultConfig();
-        string csv = csvFromConfig(gl_config);
         gl_update_config = true;
+        auto raw_cfg = configToRaw(gl_config);
         xSemaphoreGive(config_mux);
-        if (!writeConfigFile(csv)) {
+
+        if (!writeConfigToFile(NEW_CONFIG_PATH, raw_cfg))
             printf("Failed to write reset config to file\n");
-        }
-        return vector<uint8_t>(csv.begin(), csv.end());
+
+        return raw_cfg;
     }
 
     else if (StrEndsWith(uri, OK_WEB_PATH)) {
@@ -735,19 +729,21 @@ HttpServer::Content getUriHandler(const char* uri) {
 
 string postUriHandler(string uri, vector<uint8_t> payload) {
     if (StrEndsWith(uri, CONFIG_SAVE_WEB_PATH)) {
-        string csv = string(payload.begin(), payload.end());
-
+        
         xSemaphoreTake(config_mux, portMAX_DELAY);
-        if (!configFromCsv(csv, &gl_config)) {
-            printf("Invalid CSV provided\n");
+        if (!configFromRaw(payload, &gl_config)) {
+            printf("Invalid config data provided\n");
+            xSemaphoreGive(config_mux);
+            return {};
         }
         gl_update_config = true;
         xSemaphoreGive(config_mux);
 
-        if (!writeConfigFile(csv)) {
-            printf("Failed to write csv to file\n");
+        if (!writeConfigToFile(NEW_CONFIG_PATH, payload)) {
+            printf("Failed to write config to file\n");
             return {};
         }
+
         return string(OK_WEB_PATH);
     }
 
@@ -785,15 +781,15 @@ extern "C" [[noreturn]] void app_main(void* param) {
 
 
     //load config
-    string csv = readConfigFile();
+    auto raw_cfg = readConfigFromFile(NEW_CONFIG_PATH);
     //empty/non-existant file or malformed csv
-    if (!csv.size() || !configFromCsv(csv, &gl_config)) {
+    if (!raw_cfg.size() || !configFromRaw(raw_cfg, &gl_config)) {
         gl_config = buildDefaultConfig();
-        if (!writeConfigFile(csvFromConfig(gl_config))) {
-            printf("Failed to write config file\n");
+        if (!writeConfigToFile(NEW_CONFIG_PATH, configToRaw(gl_config))) {
+            printf("Failed to write config to file\n");
             reset();
         }
-        printf("Config regenerated\n");
+        printf("Default config generated\n");
     }
     else
         printf("Config loaded from file\n");

@@ -105,8 +105,6 @@
     </div>
 
     <div class="config-group">
-      <label for="jpeg-quality">Preview quality:</label>
-      <input type="number" id="jpeg-quality" name="jpeg-quality" size="3" maxlength="3" min="5" max="100">
       <label for="preview-size">Preview size:</label>
       <div class="input-wrapper">
         <input type="number" id="preview-size" name="preview-size" onchange="resizePreview()" size="4" maxlength="4"
@@ -281,7 +279,7 @@
     }
 
     //get data from device
-    function getData(url, isJson) {
+    function getData(url) {
       return fetch(url)
         .then(response => {
           //Check if the response is ok (status code 200-299)
@@ -291,7 +289,7 @@
           }
           else
             console.log("Get OK (", response.status, ")");
-          return isJson ? response.json() : response.text();
+          return response.arrayBuffer();
         })
         .catch(error => {
           console.error("Get error: ", error)
@@ -317,7 +315,6 @@
       document.getElementById("iou-thresh").value = iouThresh;
       document.getElementById("fp-change").value = fpChange;
       document.getElementById("fp-count").value = fpCount;
-      document.getElementById("jpeg-quality").value = jpegQuality;
       document.getElementById("preview-size").value = previewSize;
       document.getElementById("min-width").value = minWidth;
       document.getElementById("min-height").value = minHeight;
@@ -325,38 +322,46 @@
     }
 
     //update all required elements
-    function updateDocument(values) {
-      if (values.length < 11)
-        throw Error("Invalid csv length of ", values.length);
-      maskSize = clamp(Number(values[0]), 2, 80);
+    function updateDocument(rawCfg) {
+      console.log(rawCfg.length);
+      if (rawCfg.length < 14)
+        throw Error("Invalid config length: too small")
+
+      maskSize = rawCfg[0];
+
+      if (rawCfg.length != 10 + maskSize * maskSize)
+        throw Error("Invalid config length: mask size missmatch")
+
+      maskThresh = rawCfg[1];
+      
       createMask();
-      maskThresh = clamp(values[1], 0, 100);
       for (var i = 0; i < maskSize; i++) {
         for (var ii = 0; ii < maskSize; ii++) {
-          mask.val[i][ii] = Number(values[2][i * maskSize + ii]);
+          mask.val[i][ii] = rawCfg[2 + i * maskSize + ii];
           toggleDir = mask.val[i][ii];
           toggleCell(i, ii);
         }
       }
-      rotation = clamp(Number(values[3]), 0, 270);
-      detThresh = clamp(Number(values[4]), 0, 100);
-      iouThresh = clamp(Number(values[5]), 0, 100);
-      fpChange = clamp(Number(values[6]), 0, 100);
-      fpCount = clamp(Number(values[7]), 0, 100);
-      jpegQuality = clamp(Number(values[8]), 5, 100);
-      minWidth = clamp(Number(values[9]), 0, 320);
-      minHeight = clamp(Number(values[10]), 0, 320);
-      minAsArea = clamp(Number(values[11]), 0, 1) ? true : false;
+
+      let totalMaskSize = maskSize * maskSize;
+      rotation  = rawCfg[totalMaskSize + 2] * 90;
+      detThresh = rawCfg[totalMaskSize + 3];
+      iouThresh = rawCfg[totalMaskSize + 4];
+      fpChange  = rawCfg[totalMaskSize + 5];
+      fpCount   = rawCfg[totalMaskSize + 6];
+      minWidth  = rawCfg[totalMaskSize + 7];
+      minHeight = rawCfg[totalMaskSize + 8];
+      minAsArea = rawCfg[totalMaskSize + 10] ? true : false;
 
       updateElements()
     }
 
     //load configuration from device
     function loadConfig() {
-      getData(configLoadUrl, false)
-        .then(config => {
+      getData(configLoadUrl)
+        .then(cfgBuffer => {
+          updateDocument(new Uint8Array(cfgBuffer));
           console.log("Config loaded");
-          updateDocument(config.split(","));
         })
         .catch(error => console.error("Failed to load config: ", error));
     }
@@ -386,31 +391,49 @@
 
     //Send and save current configuration to device
     function saveConfig() {
-      maskSize = clamp(document.getElementById("mask-size").value, 2, 80);
+      maskSize   = clamp(document.getElementById("mask-size").value, 2, 80);
       maskThresh = clamp(document.getElementById("mask-thresh").value, 0, 100);
-      rotation = clamp(document.getElementById("image-rotation").value, 0, 270);
-      detThresh = clamp(document.getElementById("det-thresh").value, 0, 100);
-      iouThresh = clamp(document.getElementById("iou-thresh").value, 0, 100);
-      fpChange = clamp(document.getElementById("fp-change").value, 0, 100);
-      fpCount = clamp(document.getElementById("fp-count").value, 0, 100);
-      jpegQuality = clamp(document.getElementById("jpeg-quality").value, 5, 100);
-      minWidth = clamp(document.getElementById("min-width").value, 0, 320);
-      minHeight = clamp(document.getElementById("min-height").value, 0, 320);
-      minAsArea = document.getElementById("min-as-area").checked;
+      rotation   = clamp(document.getElementById("image-rotation").value, 0, 270);
+      detThresh  = clamp(document.getElementById("det-thresh").value, 0, 100);
+      iouThresh  = clamp(document.getElementById("iou-thresh").value, 0, 100);
+      fpChange   = clamp(document.getElementById("fp-change").value, 0, 100);
+      fpCount    = clamp(document.getElementById("fp-count").value, 0, 100);
+      minWidth   = clamp(document.getElementById("min-width").value, 0, 320);
+      minHeight  = clamp(document.getElementById("min-height").value, 0, 320);
+      minAsArea  = document.getElementById("min-as-area").checked;
       updateElements();
 
-      var csv = csvFromConfig();
-      postData(configSaveUrl, "text/plain", csv)
-        .then(console.log("Config saved:", csv))
+      let totalMaskSize = maskSize * maskSize;
+      let rawCfg = new Uint8Array(10 + totalMaskSize);
+      rawCfg[0] = maskSize;
+      rawCfg[1] = maskThresh;
+      for (var i = 0; i < maskSize; i++) {
+        for (var ii = 0; ii < maskSize; ii++) {
+          rawCfg[2 + i * maskSize + ii] = mask.val[i][ii];
+        }
+      }
+      rawCfg[totalMaskSize + 3] = rotation / 90;
+      rawCfg[totalMaskSize + 4] = detThresh;
+      rawCfg[totalMaskSize + 5] = iouThresh;
+      rawCfg[totalMaskSize + 6] = fpChange;
+      rawCfg[totalMaskSize + 7] = fpCount;
+      rawCfg[totalMaskSize + 8] = minWidth;
+      rawCfg[totalMaskSize + 9] = minHeight;
+      rawCfg[totalMaskSize + 10] = minAsArea ? 1 : 0;
+
+      console.log(rawCfg.byteLength);
+
+      postData(configSaveUrl, "application/octet-stream", rawCfg)
+        .then(console.log("Config saved"))
         .catch(error => console.error("Failed to save config: ", error));
     }
 
     //Request config reset from device
     function resetConfig() {
-      getData(configResetUrl, false)
-        .then(config => {
+      getData(configResetUrl)
+        .then(cfgBuffer => {
+          updateDocument(new Uint8Array(cfgBuffer));
           console.log("Config reset loaded");
-          updateDocument(config.split(","));
         })
         .catch(error => console.error("Failed to reset load config: ", error));
     }
@@ -560,8 +583,8 @@
     async function updatePreview() {
       while (1) {
         try {
-          let arrayBuffer = await fetch(imgUrl).then(resp => resp.arrayBuffer()); //Get image with status
-          let uint8Array = new  Uint8Array(arrayBuffer);
+          let arrayBuffer = await getData(imgUrl); //Get image with status
+          let uint8Array = new Uint8Array(arrayBuffer);
           let dataView = new DataView(arrayBuffer);
 
           //get results and status
