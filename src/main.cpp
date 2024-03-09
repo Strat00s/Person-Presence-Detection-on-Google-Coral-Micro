@@ -152,86 +152,13 @@ cfg_struct_t buildDefaultConfig() {
     return cfg;
 }
 
-
-/** @brief Generate config from csv
+/**
+ * @brief Parse raw binary data as config
  * 
- * @param csv 
- * @param config 
- * @return true on success, false on invalid csv (csv has less tha 8 fields)
+ * @param raw_data raw config binary
+ * @param config where to store final config
+ * @return true on success, false otherwise
  */
-bool configFromCsv(const string &csv, cfg_struct_t *config) {
-    if (count(csv.begin(), csv.end(), ',') < 11) {
-        printf("invalid csv received\n");
-        return false;
-    }
-
-    bool malformed = false;
-    bool finished = false;
-    int field_num = -1;
-    size_t start = 0;
-    size_t end = csv.find(',');
-    cfg_struct_t new_config = buildDefaultConfig();
-
-    while (!finished) {
-        field_num++;
-        if (end == string::npos) {
-            finished = true;
-            end = csv.size();
-        }
-        string field_val = csv.substr(start, end - start);
-
-        start = end + 1;
-        end = csv.find(',', start);
-
-        //skip malformed fields
-        if (field_val.size() == 0) {
-            malformed = true;
-            continue;
-        }
-
-        //mask field
-        if (field_num == 2) {
-            new_config.mask.clear();
-            new_config.mask.reserve(field_val.size());
-            for (size_t i = 0; i < field_val.size(); i++)
-                new_config.mask.push_back(field_val[i] == '1');
-            continue;
-        }
-
-        //try to convert the field to number
-        int val = 0;
-        char *endptr;
-        val = strtol(field_val.c_str(), &endptr, 10);
-        if (*endptr) {
-            printf("Failed to convert %s to int\n", field_val.c_str());
-            malformed = true;
-            continue;
-        }
-
-        //everything but mask
-        switch (field_num) {
-            case 0:  new_config.mask_size    = val; break;
-            case 1:  new_config.mask_thresh  = val; break;
-            case 3:  new_config.rotation     = val; break;
-            case 4:  new_config.det_thresh   = val; break;
-            case 5:  new_config.iou_thresh   = val; break;
-            case 6:  new_config.fp_change    = val; break;
-            case 7:  new_config.fp_count     = val; break;
-            case 8:  new_config.jpeg_quality = val; break;
-            case 9:  new_config.min_width    = val; break;
-            case 10: new_config.min_height   = val; break;
-            case 11: new_config.min_as_area  = val; break;
-            default: printf("Unhandled field %d: %s\n", field_num, field_val.c_str()); break;
-        }
-    }
-
-    if (malformed)
-        new_config.mask.resize(new_config.mask_size * new_config.mask_size, 0);
-
-    *config = new_config;
-    return true;
-}
-
 bool configFromRaw(std::vector<uint8_t> raw_data, cfg_struct_t *config) {
     printf("raw_data len: %d\n", raw_data.size());
     //raw config is smaller than minimun size
@@ -259,30 +186,12 @@ bool configFromRaw(std::vector<uint8_t> raw_data, cfg_struct_t *config) {
 
     return true;
 }
-
-/** @brief 
+/**
+ * @brief create raw binary data from config
  * 
- * @param config 
- * @return string 
+ * @param config config to parse
+ * @return std::vector<uint8_t> raw binary config data
  */
-string csvFromConfig(const cfg_struct_t &config) {
-    string csv = to_string(config.mask_size) + ',';
-    csv += to_string(config.mask_thresh) + ',';
-    for (auto val: config.mask)
-        csv += to_string(val);
-    csv += ',';
-    csv += to_string(config.rotation)     + ',';
-    csv += to_string(config.det_thresh)   + ',';
-    csv += to_string(config.iou_thresh)   + ',';
-    csv += to_string(config.fp_change)    + ',';
-    csv += to_string(config.fp_count)     + ',';
-    csv += to_string(config.jpeg_quality) + ',';
-    csv += to_string(config.min_width)    + ',';
-    csv += to_string(config.min_height)   + ',';
-    csv += config.min_as_area ? '1' : '0';
-    return csv;
-}
-
 std::vector<uint8_t> configToRaw(const cfg_struct_t &config) {
     std::vector<uint8_t> raw_data;
     raw_data.push_back(config.mask_size);
@@ -300,30 +209,23 @@ std::vector<uint8_t> configToRaw(const cfg_struct_t &config) {
     return raw_data;
 }
 
-/** @brief Write csv config to file
+/**
+ * @brief Write config to file
  * 
- * @param csv 
+ * @param path file path
+ * @param raw_cfg raw config binary data
  * @return true on success, false otherwise
  */
-bool writeConfigFile(const string &csv) {
-    return LfsWriteFile(CONFIG_PATH, csv);
-}
-
 bool writeConfigToFile(const char *path, const std::vector<uint8_t> &raw_cfg) {
     return LfsWriteFile(path, raw_cfg.data(), raw_cfg.size());
 }
 
-/** @brief Read csv config from file
- * 
- * @return empty string on failure
- */
-string readConfigFile() {
-    string config_csv;
-    if (!LfsReadFile(CONFIG_PATH, &config_csv))
-        return {};
-    return config_csv;
-}
 
+/** @brief Read raw binary config data from file
+ * 
+ * @param path file path
+ * @return vector<uint8_t> - raw binary config data on success. Empty vector on failure.
+ */
 vector<uint8_t> readConfigFromFile(const char *path) {
     vector<uint8_t> raw_data;
     if (!LfsReadFile(path, &raw_data))

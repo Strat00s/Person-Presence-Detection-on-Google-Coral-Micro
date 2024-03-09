@@ -382,7 +382,6 @@
       csv += iouThresh.toString() + ",";
       csv += fpChange.toString() + ",";
       csv += fpCount.toString() + ",";
-      csv += jpegQuality.toString() + ',';
       csv += minWidth.toString() + ',';
       csv += minHeight.toString() + ',';
       csv += minAsArea ? '1' : '0';
@@ -459,16 +458,13 @@
       reader.onload = function (e) {
         var csv = e.target.result;
         console.log(csv);
-        updateDocument(csv.split(","));
+        updateDocument(csv.split(",")); //TODO fix
       };
 
       reader.onerror = function (e) {
         //Handle errors
         console.error("File could not be loaded: " + e.target.error.code);
       };
-
-      reader.readAsText(file); //Read the file as text
-
     }
 
 
