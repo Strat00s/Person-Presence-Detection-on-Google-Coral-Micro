@@ -1,6 +1,6 @@
 import requests
 import time
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
 import numpy as np
 import os
@@ -29,7 +29,7 @@ def fetch_and_save_data(uri, interval=0.1):
             data = response.content
 
             # Assuming the format is consistent with the JavaScript example
-            text_data, image_data = parse_data(data)
+            text_data, image_data, bboxes = parse_data(data)
 
             # Save text data
             text_file_path = os.path.join(folder_name, f"{text_counter}.txt")
@@ -38,8 +38,8 @@ def fetch_and_save_data(uri, interval=0.1):
             text_counter += 1
 
             # Save image
-            image_file_path = os.path.join(folder_name, f"{image_counter}.jpeg")
-            save_image(image_data, image_file_path)
+            image_file_path = os.path.join(folder_name, f"{image_counter}")
+            save_image(image_data, image_file_path, bboxes)
             image_counter += 1
 
         except requests.exceptions.RequestException as e:
@@ -63,7 +63,6 @@ def parse_data(data):
     # Convert the binary data to text for parsing
     text_decoder = decode_as_much_as_possible(data)
     splits = text_decoder.split(",")
-    print(text_decoder)
 
     # Extract the text data
     text_data = splits[0]  + "\n"
@@ -74,8 +73,10 @@ def parse_data(data):
     bbox_cnt = splits[4]
     bboxes_len = len(splits[5])
     bboxes = splits[5].strip(";").split(";")
+    bboxes_fin = []
     for i in range(0, int(bbox_cnt)):
         text_data += ",".join(bboxes[:6]) + "\n"
+        bboxes_fin.append([int(bboxes[0]), int(bboxes[1]), int(bboxes[2]), int(bboxes[3]), int(bboxes[4]), int(bboxes[5])])
 
     # Process image data (skipping actual conversion logic for brevity)
     # Assuming image data starts after the CSV data
@@ -84,16 +85,40 @@ def parse_data(data):
     image_data = data[csv_len:]
     print(len(image_data))
 
-    return text_data, image_data
+    return text_data, image_data, bboxes_fin
 
-def save_image(image_data, filename):
+def save_image(image_data, filename, bboxes):
     image_width = 320
     image_height = 320
 
     # Assuming image_data is in RGB format, convert it to an image
     img_array = np.frombuffer(image_data, dtype=np.uint8).reshape((image_height, image_width, 3))
     img = Image.fromarray(img_array, 'RGB')
-    img.save(filename)
+    img.save(filename + "_raw.jpeg")
+
+    # Create a drawing context to add a rectangle
+    draw = ImageDraw.Draw(img)
+    # Draw the rectangle with red outline and specified width
+    for bbox in bboxes:
+        print(bbox)
+        color = "red"
+        if bbox[1] == 1:
+            color = "red"
+        if bbox[1] == 2:
+            color = "blue"
+        if bbox[1] == 3:
+            color = "yellow"
+        if bbox[1] == 4:
+            color = "green"
+        draw.rectangle([bbox[4], bbox[5], bbox[2], bbox[3]], outline=color, width=2)
+        font_path = "/usr/share/fonts/truetype/firacode/FiraCode-Bold.ttf"
+        font = ImageFont.truetype(font=font_path, size=20)
+        draw.text([bbox[4], bbox[5] - 20], f"{bbox[0]}", fill=color, font=font)
+    
+    # Save the modified image with the rectangle
+    modified_filename = f"{filename}_res.jpeg"
+    img.save(modified_filename)
+
 # Replace 'your_uri_here' with your actual URI path
-uri = "http://192.168.1.112/camera_stream"
+uri = "http://192.168.2.2/camera_stream"
 fetch_and_save_data(uri)
