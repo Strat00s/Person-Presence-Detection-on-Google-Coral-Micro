@@ -56,7 +56,6 @@ using namespace std;
 /*----(WEB RESPONSES)----*/
 #define MAIN_PAGE_RESPONSE "/page.html"
 #define OK_RESPONSE        "/ok.txt"
-#define ERR_RESPONSE       "/err.txt"
 
 /*----(WEB PATHS)----*/
 #define STREAM_WEB_PATH           "/camera_stream"
@@ -69,6 +68,7 @@ using namespace std;
 /*----(LOCAL FILES)----*/
 #define MODEL_PATH  "/model.tflite"
 #define CONFIG_PATH "/cfg.csv"
+#define NEW_CONFIG_PATH "/cfg.bin"
 
 #define PIN0 kSpiCs
 #define PIN1 kSpiSck
@@ -81,12 +81,11 @@ using namespace std;
 /*----(DEFAULT VALUES)----*/
 #define DEFAULT_IMAGE_SIZE   320
 #define DEFAULT_MASK_SIZE    32
-#define DEFAULT_ROTATION     270
-#define DEFAULT_DET_THRESH   50
-#define DEFAULT_IOU_THRESH   50
+#define DEFAULT_ROTATION     0
+#define DEFAULT_DET_THRESH   25
+#define DEFAULT_IOU_THRESH   25
 #define DEFAULT_FP_CHANGE    0
 #define DEFAULT_FP_COUNT     0
-#define DEFAULT_JPEG_QUALITY 70
 #define DEFAULT_MASK_THRESH  70
 #define DEFAULT_MIN_WIDTH    0
 #define DEFAULT_MIN_HEIGHT   0
@@ -103,9 +102,12 @@ tflite::MicroInterpreter *interpreter;
 tflite::MicroErrorReporter error_reporter;
 
 /*----(SHARED GLOBAL VARIABLES)----*/
-int gl_status = 0;
-int gl_image_size = DEFAULT_IMAGE_SIZE;
-bool gl_update_config = true;
+int gl_status          = 0;
+int gl_image_size      = DEFAULT_IMAGE_SIZE;
+int gl_inference_time  = 0;
+int gl_camera_time     = 0;
+int gl_extraction_time = 0;
+bool gl_update_config  = true;
 cfg_struct_t gl_config;
 image_vector_t gl_image;
 bbox_vector_t gl_bboxes;
@@ -117,6 +119,7 @@ SemaphoreHandle_t sync_sem;
 TaskHandle_t detect_task_handle;
 
 
+/*----(HELPERS)----*/
 void exit() {
     printf("Exiting...\n");
     LedSet(Led::kStatus, false);
@@ -141,7 +144,7 @@ cfg_struct_t buildDefaultConfig() {
     cfg.iou_thresh   = DEFAULT_IOU_THRESH;
     cfg.fp_change    = DEFAULT_FP_CHANGE;
     cfg.fp_count     = DEFAULT_FP_COUNT;
-    cfg.jpeg_quality = DEFAULT_JPEG_QUALITY;
+    //cfg.jpeg_quality = DEFAULT_JPEG_QUALITY;
     cfg.min_width    = DEFAULT_MIN_WIDTH;
     cfg.min_height   = DEFAULT_MIN_HEIGHT;
     cfg.min_as_area  = DEFAULT_MIN_AS_AREA;
@@ -149,14 +152,15 @@ cfg_struct_t buildDefaultConfig() {
     return cfg;
 }
 
+
 /** @brief Generate config from csv
  * 
  * @param csv 
  * @param config 
  * @return true on success, false on invalid csv (csv has less tha 8 fields)
  */
-bool configFromCsv(const std::string &csv, cfg_struct_t *config) {
-    if (std::count(csv.begin(), csv.end(), ',') < 11) {
+bool configFromCsv(const string &csv, cfg_struct_t *config) {
+    if (count(csv.begin(), csv.end(), ',') < 11) {
         printf("invalid csv received\n");
         return false;
     }
@@ -170,11 +174,11 @@ bool configFromCsv(const std::string &csv, cfg_struct_t *config) {
 
     while (!finished) {
         field_num++;
-        if (end == std::string::npos) {
+        if (end == string::npos) {
             finished = true;
             end = csv.size();
         }
-        std::string field_val = csv.substr(start, end - start);
+        string field_val = csv.substr(start, end - start);
 
         start = end + 1;
         end = csv.find(',', start);
@@ -197,7 +201,7 @@ bool configFromCsv(const std::string &csv, cfg_struct_t *config) {
         //try to convert the field to number
         int val = 0;
         char *endptr;
-        val = std::strtol(field_val.c_str(), &endptr, 10);
+        val = strtol(field_val.c_str(), &endptr, 10);
         if (*endptr) {
             printf("Failed to convert %s to int\n", field_val.c_str());
             malformed = true;
@@ -228,27 +232,71 @@ bool configFromCsv(const std::string &csv, cfg_struct_t *config) {
     return true;
 }
 
+bool configFromRaw(packet_t packet, cfg_struct_t *config) {
+    //invalid packet size check
+    if (packet.size() < 10 + 4 || packet.size() < 10 + packet[1] * packet[1])
+        return false;
+    
+    int mask_size     = packet[0] * packet[0];
+    if (packet.size() < 10 + mask_size)
+        return false;
+
+    config->mask_size   = packet[0];
+    config->mask_thresh = packet[1];
+    vector<uint8_t>::const_iterator first = packet.begin() + 2;
+    vector<uint8_t>::const_iterator last  = packet.begin() + 2 + mask_size;
+    config->mask        = vector<uint8_t>(first, last);
+    config->rotation    = packet[mask_size + 3];
+    config->det_thresh  = packet[mask_size + 4];
+    config->iou_thresh  = packet[mask_size + 5];
+    config->fp_change   = packet[mask_size + 6];
+    config->fp_count    = packet[mask_size + 7];
+    config->min_width   = packet[mask_size + 8];
+    config->min_height  = packet[mask_size + 9];
+    config->min_as_area = packet[mask_size + 10];
+
+    return true;
+}
+
 /** @brief 
  * 
  * @param config 
- * @return std::string 
+ * @return string 
  */
-std::string csvFromConfig(const cfg_struct_t &config) {
-    std::string csv = std::to_string(config.mask_size) + ',';
-    csv += std::to_string(config.mask_thresh) + ',';
+string csvFromConfig(const cfg_struct_t &config) {
+    string csv = to_string(config.mask_size) + ',';
+    csv += to_string(config.mask_thresh) + ',';
     for (auto val: config.mask)
-        csv += std::to_string(val);
+        csv += to_string(val);
     csv += ',';
-    csv += std::to_string(config.rotation)     + ',';
-    csv += std::to_string(config.det_thresh)   + ',';
-    csv += std::to_string(config.iou_thresh)   + ',';
-    csv += std::to_string(config.fp_change)    + ',';
-    csv += std::to_string(config.fp_count)     + ',';
-    csv += std::to_string(config.jpeg_quality) + ',';
-    csv += std::to_string(config.min_width)    + ',';
-    csv += std::to_string(config.min_height)   + ',';
+    csv += to_string(config.rotation)     + ',';
+    csv += to_string(config.det_thresh)   + ',';
+    csv += to_string(config.iou_thresh)   + ',';
+    csv += to_string(config.fp_change)    + ',';
+    csv += to_string(config.fp_count)     + ',';
+    csv += to_string(config.jpeg_quality) + ',';
+    csv += to_string(config.min_width)    + ',';
+    csv += to_string(config.min_height)   + ',';
     csv += config.min_as_area ? '1' : '0';
     return csv;
+}
+
+packet_t createConfigPacket(const cfg_struct_t &config) {
+    packet_t packet;
+    packet.push_back(config.mask_size);
+    packet.push_back(config.mask_thresh);
+    packet.insert(packet.end(), config.mask.begin(), config.mask.end());
+    packet.push_back(config.rotation);
+    packet.push_back(config.det_thresh);
+    packet.push_back(config.iou_thresh);
+    packet.push_back(config.fp_change);
+    packet.push_back(config.fp_count);
+    //packet.push_back(config.jpeg_quality);
+    packet.push_back(config.min_width);
+    packet.push_back(config.min_height);
+    packet.push_back(config.min_as_area);
+
+    return packet;
 }
 
 /** @brief Write csv config to file
@@ -256,19 +304,31 @@ std::string csvFromConfig(const cfg_struct_t &config) {
  * @param csv 
  * @return true on success, false otherwise
  */
-bool writeConfigFile(const std::string &csv) {
+bool writeConfigFile(const string &csv) {
     return LfsWriteFile(CONFIG_PATH, csv);
+}
+
+bool writeConfigToFile(const cfg_struct_t &config) {
+    auto packet = createConfigPacket(config);
+    return LfsWriteFile(NEW_CONFIG_PATH, packet.data(), packet.size());
 }
 
 /** @brief Read csv config from file
  * 
  * @return empty string on failure
  */
-std::string readConfigFile() {
-    std::string config_csv;
+string readConfigFile() {
+    string config_csv;
     if (!LfsReadFile(CONFIG_PATH, &config_csv))
         return {};
     return config_csv;
+}
+
+vector<uint8_t> readConfigFromFile() {
+    vector<uint8_t> data;
+    if (!LfsReadFile(CONFIG_PATH, &data))
+        return {};
+    return data;
 }
 
 
@@ -334,15 +394,15 @@ bool hasBBoxChanged(const image_vector_t &current_image, const image_vector_t &p
     for (int y = bbox.ymin; y <= bbox.ymax; ++y) {
         for (int x = bbox.xmin; x <= bbox.xmax; ++x) {
             size_t index = (y * image_size + x) * 3;
-            int pixel_change = std::abs(current_image[index] - previous_image[index]) +
-                               std::abs(current_image[index + 1] - previous_image[index + 1]) +
-                               std::abs(current_image[index + 2] - previous_image[index + 2]);
+            int pixel_change = abs(current_image[index] - previous_image[index]) +
+                               abs(current_image[index + 1] - previous_image[index + 1]) +
+                               abs(current_image[index + 2] - previous_image[index + 2]);
             if (pixel_change > 0xFF * 3 * change)
                 changed++;
         }
     }
 
-    return changed > std::round(pixel_cnt * count);
+    return changed > round(pixel_cnt * count);
 }
 
 /** @brief Intersection over union calculations for overlaping bounding boxes
@@ -352,8 +412,8 @@ bool hasBBoxChanged(const image_vector_t &current_image, const image_vector_t &p
  * @return overlap ratio
  */
 float IoU(const bbox_t& a, const bbox_t& b) {
-    float int_area = std::max(0, std::min(a.xmax, b.xmax) - std::max(a.xmin, b.xmin)) *
-                     std::max(0, std::min(a.ymax, b.ymax) - std::max(a.ymin, b.ymin));
+    float int_area = max(0, min(a.xmax, b.xmax) - max(a.xmin, b.xmin)) *
+                     max(0, min(a.ymax, b.ymax) - max(a.ymin, b.ymin));
     float un_area = (a.xmax - a.xmin) * (a.ymax - a.ymin) +
                     (b.xmax - b.xmin) * (b.ymax - b.ymin) - int_area;
     return int_area / un_area;
@@ -375,7 +435,7 @@ float IoU(const bbox_t& a, const bbox_t& b) {
  * 2 if something is/was detected and is/was unmasked in last 5 frames.
  * 3 if something is detected, is unmasked and is detected in the last 3 out of 5 frames.
  */
-int postprocessResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpreter,
+int postprocessResults(vector<bbox_t> *results, tflite::MicroInterpreter *interpreter,
                const image_vector_t &image, const image_vector_t &background, const cfg_struct_t &config) {
 
     static int consec_unmasked = 0; //keeps count of consecutive unmasked detections
@@ -402,11 +462,11 @@ int postprocessResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *i
             continue;
 
         bbox_t bbox = {
-            .xmin  = std::max(0.0f, std::round(bboxes[4 * i + 1] * gl_image_size)),
-            .ymin  = std::max(0.0f, std::round(bboxes[4 * i]     * gl_image_size)),
-            .xmax  = std::max(0.0f, std::round(bboxes[4 * i + 3] * gl_image_size)),
-            .ymax  = std::max(0.0f, std::round(bboxes[4 * i + 2] * gl_image_size)),
-            .score = std::round(scores[i] * 100),
+            .xmin  = max(0.0f, round(bboxes[4 * i + 1] * gl_image_size)),
+            .ymin  = max(0.0f, round(bboxes[4 * i]     * gl_image_size)),
+            .xmax  = max(0.0f, round(bboxes[4 * i + 3] * gl_image_size)),
+            .ymax  = max(0.0f, round(bboxes[4 * i + 2] * gl_image_size)),
+            .score = round(scores[i] * 100),
             .type  = BBOX_MASKED
         };
         if (bbox.xmax >= gl_image_size)
@@ -463,9 +523,9 @@ int postprocessResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *i
     }
 
     // order indices to the tmp_results from highest to lowest scores
-    std::vector<int> indices(tmp_results.size());
-    std::iota(indices.begin(), indices.end(), 0);
-    std::sort(indices.begin(), indices.end(), [&](int lhs, int rhs) {
+    vector<int> indices(tmp_results.size());
+    iota(indices.begin(), indices.end(), 0);
+    sort(indices.begin(), indices.end(), [&](int lhs, int rhs) {
         return tmp_results[lhs].score > tmp_results[rhs].score;
     });
 
@@ -515,9 +575,7 @@ int postprocessResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *i
 }
 
 
-int gl_inference_time  = 0;
-int gl_camera_time     = 0;
-int gl_extraction_time = 0;
+
 //Main detect task
 static void detectTask(void *args) {
     gl_status = 0;
@@ -571,12 +629,13 @@ static void detectTask(void *args) {
             xSemaphoreTake(config_mux, portMAX_DELAY);
             config = gl_config;
             gl_update_config = false;
-            switch (gl_config.rotation) {
-                case 0:   frame.rotation = CameraRotation::k0;   break;
-                case 90:  frame.rotation = CameraRotation::k90;  break;
-                case 180: frame.rotation = CameraRotation::k180; break;
-                case 270: frame.rotation = CameraRotation::k270; break;
-            }
+            frame.rotation = static_cast<coralmicro::CameraRotation>(gl_config.rotation);
+            //switch (gl_config.rotation) {
+            //    case 0:   frame.rotation = CameraRotation::k0;   break;
+            //    case 90:  frame.rotation = CameraRotation::k90;  break;
+            //    case 180: frame.rotation = CameraRotation::k180; break;
+            //    case 270: frame.rotation = CameraRotation::k270; break;
+            //}
             xSemaphoreGive(config_mux);
         }
 
@@ -610,28 +669,28 @@ static void detectTask(void *args) {
 /*----(REQUEST HANDLERS)----*/
 HttpServer::Content getUriHandler(const char* uri) {
     if (StrEndsWith(uri, "index.shtml") || StrEndsWith(uri, "index.html"))
-        return std::string(MAIN_PAGE_RESPONSE);
+        return string(MAIN_PAGE_RESPONSE);
 
     else if (StrEndsWith(uri, STREAM_WEB_PATH)) {
         xSemaphoreTake(sync_sem, portMAX_DELAY);
         //xSemaphoreTake(data_mux, portMAX_DELAY);
         MutexLock lock(data_mux);
-        std::string csv = std::to_string(gl_status) + ',';
-        csv += std::to_string(gl_camera_time)     + ',';
-        csv += std::to_string(gl_inference_time)  + ',';
-        csv += std::to_string(gl_extraction_time) + ',';
-        csv += std::to_string(gl_bboxes.size())   + ',';
+        string csv = to_string(gl_status) + ',';
+        csv += to_string(gl_camera_time)     + ',';
+        csv += to_string(gl_inference_time)  + ',';
+        csv += to_string(gl_extraction_time) + ',';
+        csv += to_string(gl_bboxes.size())   + ',';
         for (size_t i = 0; i < gl_bboxes.size(); i++) {
-            csv += std::to_string(gl_bboxes[i].score) + ';';
-            csv += std::to_string(gl_bboxes[i].type)  + ';';
-            csv += std::to_string(gl_bboxes[i].xmax)  + ';';
-            csv += std::to_string(gl_bboxes[i].ymax)  + ';';
-            csv += std::to_string(gl_bboxes[i].xmin)  + ';';
-            csv += std::to_string(gl_bboxes[i].ymin)  + ';';
+            csv += to_string(gl_bboxes[i].score) + ';';
+            csv += to_string(gl_bboxes[i].type)  + ';';
+            csv += to_string(gl_bboxes[i].xmax)  + ';';
+            csv += to_string(gl_bboxes[i].ymax)  + ';';
+            csv += to_string(gl_bboxes[i].xmin)  + ';';
+            csv += to_string(gl_bboxes[i].ymin)  + ';';
         }
         csv += ",";
 
-        std::vector<uint8_t> result(csv.begin(), csv.end());
+        vector<uint8_t> result(csv.begin(), csv.end());
         result.reserve(result.size() + gl_image.size());
         for (size_t i = 0; i < gl_image.size(); i++)
             result.push_back(gl_image[i]);
@@ -640,40 +699,40 @@ HttpServer::Content getUriHandler(const char* uri) {
     }
 
     else if (StrEndsWith(uri, DETECTION_STATUS_WEB_PATH)) {
-        std::vector<uint8_t> status;
+        vector<uint8_t> status;
         status.push_back(gl_status);
         return status;
     }
 
     else if (StrEndsWith(uri, CONFIG_LOAD_WEB_PATH)) {
         xSemaphoreTake(config_mux, portMAX_DELAY);
-        std::string csv = csvFromConfig(gl_config);
+        string csv = csvFromConfig(gl_config);
         xSemaphoreGive(config_mux);
-        return std::vector<uint8_t>(csv.begin(), csv.end());
+        return vector<uint8_t>(csv.begin(), csv.end());
     }
 
     else if (StrEndsWith(uri, CONFIG_RESET_WEB_PATH)) {
         xSemaphoreTake(config_mux, portMAX_DELAY);
         gl_config = buildDefaultConfig();
-        std::string csv = csvFromConfig(gl_config);
+        string csv = csvFromConfig(gl_config);
         gl_update_config = true;
         xSemaphoreGive(config_mux);
         if (!writeConfigFile(csv)) {
             printf("Failed to write reset config to file\n");
         }
-        return std::vector<uint8_t>(csv.begin(), csv.end());
+        return vector<uint8_t>(csv.begin(), csv.end());
     }
 
     else if (StrEndsWith(uri, OK_WEB_PATH)) {
-        return std::string(OK_RESPONSE);
+        return string(OK_RESPONSE);
     }
 
     return {};
 }
 
-std::string postUriHandler(std::string uri, std::vector<uint8_t> payload) {
+string postUriHandler(string uri, vector<uint8_t> payload) {
     if (StrEndsWith(uri, CONFIG_SAVE_WEB_PATH)) {
-        std::string csv = std::string(payload.begin(), payload.end());
+        string csv = string(payload.begin(), payload.end());
 
         xSemaphoreTake(config_mux, portMAX_DELAY);
         if (!configFromCsv(csv, &gl_config)) {
@@ -686,7 +745,7 @@ std::string postUriHandler(std::string uri, std::vector<uint8_t> payload) {
             printf("Failed to write csv to file\n");
             return {};
         }
-        return std::string(OK_WEB_PATH);
+        return string(OK_WEB_PATH);
     }
 
     printf("unhandled uri: %s\n", uri.c_str());
@@ -701,6 +760,7 @@ extern "C" [[noreturn]] void app_main(void* param) {
     LedSet(Led::kStatus, true);
     GpioSetMode(PIN0, GpioMode::kOutput);
     GpioSetMode(PIN1, GpioMode::kOutput);
+
 
     config_mux = xSemaphoreCreateMutex();
     data_mux   = xSemaphoreCreateMutex();
@@ -722,7 +782,7 @@ extern "C" [[noreturn]] void app_main(void* param) {
 
 
     //load config
-    std::string csv = readConfigFile();
+    string csv = readConfigFile();
     //empty/non-existant file or malformed csv
     if (!csv.size() || !configFromCsv(csv, &gl_config)) {
         gl_config = buildDefaultConfig();
@@ -755,7 +815,7 @@ extern "C" [[noreturn]] void app_main(void* param) {
 
 
     //Read the model and checks version.
-    std::vector<uint8_t> model_raw;  //entire model is stored in this vector
+    vector<uint8_t> model_raw;  //entire model is stored in this vector
     if (!LfsReadFile(MODEL_PATH, &model_raw)) {
         TF_LITE_REPORT_ERROR(&error_reporter, "Failed to load model!");
         vTaskSuspend(nullptr);
