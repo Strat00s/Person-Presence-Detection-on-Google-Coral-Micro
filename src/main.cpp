@@ -1,3 +1,14 @@
+/**
+ * @file main.cpp
+ * @author Lukáš Baštýř (l.bastyr@seznam.cz)
+ * @brief 
+ * @version 1.0
+ * @date 10-11-2023
+ * 
+ * @copyright Copyright (c) 2024
+ * 
+ */
+
 #include <cstdio>
 #include <vector>
 #include <algorithm>
@@ -38,6 +49,7 @@
 using namespace coralmicro;
 using namespace std;
 
+
 /*----(FUNCTION MACROS)----*/
 #define IMAGE_SIZE gl_image_size * gl_image_size * 3
 
@@ -53,7 +65,6 @@ using namespace std;
 #define CONFIG_LOAD_WEB_PATH      "/config_load"
 #define CONFIG_RESET_WEB_PATH     "/config_reset"
 #define OK_WEB_PATH               "/ok"
-#define ERR_WEB_PATH              "/err"
 
 /*----(LOCAL FILES)----*/
 #define MODEL_PATH  "/model.tflite"
@@ -81,12 +92,12 @@ using namespace std;
 #define DEFAULT_MIN_HEIGHT   0
 #define DEFAULT_MIN_AS_AREA  false
 
+/*----(TENSOR ARENA)----*/
 #define TENSOR_ARENA_SIZE     5700000 //enough from testing
 STATIC_TENSOR_ARENA_IN_SDRAM(tensor_arena, TENSOR_ARENA_SIZE); //OCRAM is too small for this
 
 
 /*----(TFLITE MICRO)----*/
-//must be global for some reason
 tflite::MicroMutableOpResolver<3> resolver;
 tflite::MicroInterpreter *interpreter;
 tflite::MicroErrorReporter error_reporter;
@@ -110,6 +121,12 @@ void exit() {
     printf("Exiting...\n");
     LedSet(Led::kStatus, false);
     vTaskSuspend(NULL);
+}
+
+void reset() {
+    printf("Restarting...\n");
+    LedSet(Led::kStatus, false);
+    ResetToFlash();
 }
 
 
@@ -251,55 +268,6 @@ std::string readConfigFile() {
     if (!LfsReadFile(CONFIG_PATH, &config_csv))
         return {};
     return config_csv;
-}
-
-
-/*----(IMAGE DRAWING)----*/
-/** @brief Simple function to draw rectangles into raw picture
- * 
- * @param bbox bounding box to be drawn
- * @param image image to which to draw
- * @param image_size image size
- * @param r red channel value
- * @param g green channel value
- * @param b bluc channel value
- */
-void drawRectangle(bbox_t bbox, image_vector_t *image, int image_size, uint8_t r, uint8_t g, uint8_t b) {
-    if (bbox.xmin < 0)
-        bbox.xmin = 0;
-    if (bbox.ymin < 0)
-        bbox.ymin = 0;
-    if (bbox.xmax > image_size - 1)
-        bbox.xmax = image_size - 1;
-    if (bbox.ymax > image_size - 1)
-        bbox.ymax = image_size - 1;
-
-    //draw top and bottom sides
-    int max_start = (bbox.ymax * image_size + bbox.xmin) * 3;
-    int min_start = (bbox.ymin * image_size + bbox.xmin) * 3;
-    int step = 3;
-    int end = (bbox.xmax - bbox.xmin) * step;
-    for (int i = 0; i < end; i += step) {
-        (*image)[max_start + i]     = r;
-        (*image)[max_start + i + 1] = g;
-        (*image)[max_start + i + 2] = b;
-        (*image)[min_start + i]     = r;
-        (*image)[min_start + i + 1] = g;
-        (*image)[min_start + i + 2] = b;
-    }
-
-    //draw left and right sides
-    max_start = (bbox.ymin * image_size + bbox.xmax) * 3;
-    step = image_size * 3;
-    end = (bbox.ymax - bbox.ymin) * step;
-    for (int i = 0; i < end; i += step) {
-        (*image)[max_start + i]     = r;
-        (*image)[max_start + i + 1] = g;
-        (*image)[max_start + i + 2] = b;
-        (*image)[min_start + i]     = r;
-        (*image)[min_start + i + 1] = g;
-        (*image)[min_start + i + 2] = b;
-    }
 }
 
 
