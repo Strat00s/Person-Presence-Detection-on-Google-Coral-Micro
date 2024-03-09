@@ -186,6 +186,36 @@
     </div>
 
     <div class="config-group">
+      <label for="camera-time-field">Capture time:</label>
+      <div class="input-wrapper">
+        <input type="number" id="camera-time-field" name="camera-time-field" size="1" maxlength="1" disabled>
+        <span>ms</span>
+      </div>
+
+      <label for="inference-time-field">Inference time:</label>
+      <div class="input-wrapper">
+        <input type="number" id="inference-time-field" name="inference-time-field" size="1" maxlength="1" disabled>
+        <span>ms</span>
+      </div>
+
+      <label for="postprocess-time-field">Postprocessing time:</label>
+      <div class="input-wrapper">
+        <input type="number" id="postprocess-time-field" name="postprocess-time-field" size="1" maxlength="1" disabled>
+        <span>ms</span>
+      </div>
+
+      <br>
+      <br>
+
+      <label for="total-time-field">Total time:</label>
+      <div class="input-wrapper">
+        <input type="number" id="total-time-field" name="total-time-field" size="1" maxlength="1" disabled>
+        <span>ms</span>
+      </div>
+
+      <br>
+      <br>
+      
       <label for="status-field">Status:</label>
       <input type="number" id="status-field" name="status-field" size="1" maxlength="1" disabled>
     </div>
@@ -226,7 +256,7 @@
     }
 
 
-    //Post data to device
+    //post data to device
     function postData(url, type, data) {
       return fetch(url, {
         method: "POST",
@@ -250,7 +280,7 @@
         .catch(error => console.error("Error: ", error))
     }
 
-    //Get data from device
+    //get data from device
     function getData(url, isJson) {
       return fetch(url)
         .then(response => {
@@ -269,7 +299,7 @@
         });
     }
 
-
+    //clamp values between min and max
     function clamp(val, min, max) {
       if (val < min)
         return min;
@@ -278,7 +308,7 @@
       return val;
     }
 
-
+    //update all elements with stored values
     function updateElements() {
       document.getElementById("mask-size").value = maskSize;
       document.getElementById("mask-thresh").value = maskThresh;
@@ -294,7 +324,7 @@
       document.getElementById("min-as-area").checked = minAsArea;
     }
 
-    //Update all required elements
+    //update all required elements
     function updateDocument(values) {
       if (values.length < 11)
         throw Error("Invalid csv length of ", values.length);
@@ -419,7 +449,7 @@
     }
 
 
-    //Function to toggle cells
+    //toggle cells when moused over
     function toggleCell(i, j) {
       if (toggleDir)
         mask.elem[i][j].classList.add("toggled");
@@ -429,7 +459,7 @@
       mask.val[i][j] = toggleDir;
     }
 
-    //Un/Hide the mask
+    //un/hide the mask
     function toggleMask() {
       var mask = document.getElementById("gridCanvas");
       if (mask.style.display == "none")
@@ -531,62 +561,51 @@
       while (1) {
         try {
           let arrayBuffer = await fetch(imgUrl).then(resp => resp.arrayBuffer()); //Get image with status
+          let uint8Array = new  Uint8Array(arrayBuffer);
+          let dataView = new DataView(arrayBuffer);
 
-          let textDecoder = new TextDecoder("utf-8");
-          let textData = textDecoder.decode(arrayBuffer);
-          let splits = textData.split(",");
-
-          let status    = splits[0];
-          let cam_time  = splits[1];
-          let infr_time = splits[2];
-          let extr_time = splits[3];
-          let bbox_cnt  = splits[4];
-          let bboxes    = ""
-          let bbox_data = Array(0);
-          let bboxes_str = ""
-          if (bbox_cnt != "0") {
-            bboxes_str = splits[5];
-            bboxes = bboxes_str.substring(0, bboxes_str.length - 1);
-            bboxes = bboxes.split(";");
-            for (let i = 0; i < Number(bbox_cnt); i++) {
-              let score = Number(bboxes[i * 6 + 0]);
-              let type  = Number(bboxes[i * 6 + 1]);
-              let xmax  = Number(bboxes[i * 6 + 2]);
-              let ymax  = Number(bboxes[i * 6 + 3]);
-              let xmin  = Number(bboxes[i * 6 + 4]);
-              let ymin  = Number(bboxes[i * 6 + 5]);
-              bbox_data.push([score, type, xmax, ymax, xmin, ymin]);
-            }
-            console.log(bbox_data);
+          //get results and status
+          let status          = uint8Array[0] - 128;
+          let cameraTime      = uint8Array[1];
+          let inferenceTime   = uint8Array[2];
+          let postprocessTime = uint8Array[3];
+          let bboxCnt         = uint8Array[4];
+          let bboxes          = Array(0);
+          for (let i = 0; i < bboxCnt; i++) {
+            let score = uint8Array[i * 10 + 0 + 5];
+            let type  = uint8Array[i * 10 + 1 + 5];
+            let xmax  = dataView.getUint16(i * 10 + 2 + 5, false);
+            let ymax  = dataView.getUint16(i * 10 + 4 + 5, false);
+            let xmin  = dataView.getUint16(i * 10 + 6 + 5, false);
+            let ymin  = dataView.getUint16(i * 10 + 8 + 5, false);
+            bboxes.push([score, type, xmax, ymax, xmin, ymin]);
           }
 
-          let csv_len = 6 + status.length + cam_time.length + infr_time.length + extr_time.length + bbox_cnt.length + bboxes_str.length;
-          
-          const rawImageData = arrayBuffer.slice(csv_len);      //Slice jpeg from the data
-          let imageWidth = 320;
-          let imageHeight = 320;
-          let imageDataArray = new Uint8ClampedArray(imageWidth * imageHeight * 4);
+          //get the image
+          let imageStart = 5 + bboxCnt * 10 + 2;
+          let imageSize = dataView.getUint16(imageStart - 2);
+          const rawImageData = arrayBuffer.slice(imageStart);      //Slice jpeg from the data
+          let imageDataArray = new Uint8ClampedArray(imageSize * imageSize * 4);
           // Convert the RGB values to RGBA by adding an alpha value of 255 (fully opaque)
-          for (let i = 0, j = 0; i < arrayBuffer.byteLength - csv_len; i += 3, j += 4) {
+          for (let i = 0, j = 0; i < imageSize * imageSize * 3; i += 3, j += 4) {
             imageDataArray[j] = new Uint8Array(rawImageData)[i];     // Red
             imageDataArray[j + 1] = new Uint8Array(rawImageData)[i + 1]; // Green
             imageDataArray[j + 2] = new Uint8Array(rawImageData)[i + 2]; // Blue
             imageDataArray[j + 3] = 255; // Alpha (fully opaque)
           }
 
-          // Prepare a canvas to draw the image
+          //create a canvas for drawing bboxes on the image
           let canvas = document.createElement('canvas');
-          canvas.width = imageWidth;
-          canvas.height = imageHeight;
+          canvas.width = imageSize;
+          canvas.height = imageSize;
           let ctx = canvas.getContext('2d');
-
-          // Create an ImageData object with the RGBA data and put it in the canvas
-          let imageData = new ImageData(imageDataArray, imageWidth, imageHeight);
+          let imageData = new ImageData(imageDataArray, imageSize, imageSize);
           ctx.putImageData(imageData, 0, 0);
 
-          for (let i = 0; i < bbox_data.length; i++) {
+          //draw the boxes with text
+          for (let i = 0; i < bboxes.length; i++) {
             let color = "red";
-            switch (bbox_data[i][1]) {
+            switch (bboxes[i][1]) {
               case 1: color = "red";    break;
               case 2: color = "blue";   break;
               case 3: color = "yellow"; break;
@@ -595,19 +614,19 @@
             ctx.strokeStyle = color;
             ctx.lineWidth = 3;
 
-            let rectWidth  = bbox_data[i][2] - bbox_data[i][4];
-            let rectHeight = bbox_data[i][3] - bbox_data[i][5];
-            ctx.strokeRect(bbox_data[i][4], bbox_data[i][5], rectWidth, rectHeight);
+            let rectWidth  = bboxes[i][2] - bboxes[i][4];
+            let rectHeight = bboxes[i][3] - bboxes[i][5];
+            ctx.strokeRect(bboxes[i][4], bboxes[i][5], rectWidth, rectHeight);
             ctx.fillStyle = color;
             ctx.font = "16px Arial";
-            ctx.fillText(String(bbox_data[0][0]), bbox_data[i][4], bbox_data[i][5] - 5);
+            ctx.fillText(String(bboxes[0][0]), bboxes[i][4], bboxes[i][5] - 5);
           }
 
-          // Convert canvas to JPEG Blob
+          //convert canvas to jpeg blob
           canvas.toBlob(function (blob) {
             let imgElem = document.getElementById("stream");
 
-            // Revoke the previous object URL to avoid memory leaks
+            //revoke the previous blob to avoid memory leaks
             if (imgElem.src.startsWith('blob:'))
               URL.revokeObjectURL(imgElem.src);
 
@@ -617,19 +636,17 @@
 
           }, 'image/jpeg');
 
-          console.log(status);
-          console.log(cam_time);
-          console.log(infr_time);
-          console.log(extr_time);
-          console.log(bbox_cnt);
-
-          document.getElementById("status-field").value = Number(status);
+          document.getElementById("status-field").value = status;
+          document.getElementById("camera-time-field").value = cameraTime;
+          document.getElementById("inference-time-field").value = inferenceTime;
+          document.getElementById("postprocess-time-field").value = postprocessTime;
+          document.getElementById("total-time-field").value = cameraTime + inferenceTime + postprocessTime;
         } catch (reason) {
           console.error("Error while fetching image: " + reason.toString());
         }
 
-        //Adjust this value as needed for performance and update frequency
-        await sleep(100);
+        //wait
+        await sleep(50);
       }
     }
 

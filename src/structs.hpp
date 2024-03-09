@@ -33,6 +33,20 @@ typedef struct{
     bool min_as_area;
 } cfg_struct_t;
 
+//typedef struct{
+//    uint8_t mask_size;
+//    uint8_t mask_thresh;
+//    std::vector<uint8_t> mask;
+//    uint8_t rotation;
+//    uint8_t det_thresh;
+//    uint8_t iou_thresh;
+//    uint8_t fp_change;
+//    uint8_t fp_count;
+//    uint8_t min_width;
+//    uint8_t min_height;
+//    bool min_as_area;
+//} cfg_struct_t;
+
 typedef struct {
     int status;
     image_vector_t image;

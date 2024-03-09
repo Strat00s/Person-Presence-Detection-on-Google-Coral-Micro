@@ -95,7 +95,6 @@ class PostHttpServer : public HttpServer {
             current_pbuf = current_pbuf->next;
         }
 
-        pbuf_free(p);
         return ERR_OK;
     };
 

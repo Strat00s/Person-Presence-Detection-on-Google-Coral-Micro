@@ -87,6 +87,7 @@ using namespace std;
 #define DEFAULT_FP_CHANGE    0
 #define DEFAULT_FP_COUNT     0
 #define DEFAULT_MASK_THRESH  70
+#define DEFAULT_JPEG_QUALITY 70
 #define DEFAULT_MIN_WIDTH    0
 #define DEFAULT_MIN_HEIGHT   0
 #define DEFAULT_MIN_AS_AREA  false
@@ -106,7 +107,7 @@ int gl_status          = 0;
 int gl_image_size      = DEFAULT_IMAGE_SIZE;
 int gl_inference_time  = 0;
 int gl_camera_time     = 0;
-int gl_extraction_time = 0;
+int gl_postprocess_time = 0;
 bool gl_update_config  = true;
 cfg_struct_t gl_config;
 image_vector_t gl_image;
@@ -144,7 +145,7 @@ cfg_struct_t buildDefaultConfig() {
     cfg.iou_thresh   = DEFAULT_IOU_THRESH;
     cfg.fp_change    = DEFAULT_FP_CHANGE;
     cfg.fp_count     = DEFAULT_FP_COUNT;
-    //cfg.jpeg_quality = DEFAULT_JPEG_QUALITY;
+    cfg.jpeg_quality = DEFAULT_JPEG_QUALITY;
     cfg.min_width    = DEFAULT_MIN_WIDTH;
     cfg.min_height   = DEFAULT_MIN_HEIGHT;
     cfg.min_as_area  = DEFAULT_MIN_AS_AREA;
@@ -232,7 +233,7 @@ bool configFromCsv(const string &csv, cfg_struct_t *config) {
     return true;
 }
 
-bool configFromRaw(packet_t packet, cfg_struct_t *config) {
+bool configFromRaw(std::vector<uint8_t> packet, cfg_struct_t *config) {
     //invalid packet size check
     if (packet.size() < 10 + 4 || packet.size() < 10 + packet[1] * packet[1])
         return false;
@@ -281,8 +282,8 @@ string csvFromConfig(const cfg_struct_t &config) {
     return csv;
 }
 
-packet_t createConfigPacket(const cfg_struct_t &config) {
-    packet_t packet;
+std::vector<uint8_t> createConfigPacket(const cfg_struct_t &config) {
+    std::vector<uint8_t> packet;
     packet.push_back(config.mask_size);
     packet.push_back(config.mask_thresh);
     packet.insert(packet.end(), config.mask.begin(), config.mask.end());
@@ -596,17 +597,17 @@ static void detectTask(void *args) {
         true
     };
 
-    int ret;
     int bckg_upd_cnt = 0;
     int inference_time = 0;
 
     TickType_t last_wake_time;
     const TickType_t frequency = 50;
+
     while (true) {
         vTaskDelayUntil(&last_wake_time, frequency);
 
         int ticks = xTaskGetTickCount();
-        ret = CameraTask::GetSingleton()->GetFrame({frame});
+        int ret = CameraTask::GetSingleton()->GetFrame({frame});
         if (!ret) {
             printf("Failed to get image from camera.\r\n");
             gl_status = -1;
@@ -629,13 +630,13 @@ static void detectTask(void *args) {
             xSemaphoreTake(config_mux, portMAX_DELAY);
             config = gl_config;
             gl_update_config = false;
-            frame.rotation = static_cast<coralmicro::CameraRotation>(gl_config.rotation);
-            //switch (gl_config.rotation) {
-            //    case 0:   frame.rotation = CameraRotation::k0;   break;
-            //    case 90:  frame.rotation = CameraRotation::k90;  break;
-            //    case 180: frame.rotation = CameraRotation::k180; break;
-            //    case 270: frame.rotation = CameraRotation::k270; break;
-            //}
+            //frame.rotation = static_cast<coralmicro::CameraRotation>(gl_config.rotation);
+            switch (gl_config.rotation) {
+                case 0:   frame.rotation = CameraRotation::k0;   break;
+                case 90:  frame.rotation = CameraRotation::k90;  break;
+                case 180: frame.rotation = CameraRotation::k180; break;
+                case 270: frame.rotation = CameraRotation::k270; break;
+            }
             xSemaphoreGive(config_mux);
         }
 
@@ -644,13 +645,13 @@ static void detectTask(void *args) {
         int extract_time = xTaskGetTickCount();
         gl_image = image_vector_t(tensor_input, tensor_input + IMAGE_SIZE);
         gl_status = postprocessResults(&gl_bboxes, interpreter, gl_image, background, config);
-        gl_extraction_time = xTaskGetTickCount() - extract_time;
+        gl_postprocess_time = xTaskGetTickCount() - extract_time;
         xSemaphoreGive(data_mux);
         xSemaphoreGive(sync_sem);   //sync with web task (if it is waiting for us)
 
-        //toggle led and pins of detection
+        //toggle led and pins
         LedSet(Led::kUser, gl_status > 2);
-        GpioSet(PIN0, gl_status < 3 && gl_status > 1);
+        GpioSet(PIN0, gl_status < 3 && gl_status > 0);
         GpioSet(PIN1, gl_status > 2);
 
         //update background
@@ -673,29 +674,31 @@ HttpServer::Content getUriHandler(const char* uri) {
 
     else if (StrEndsWith(uri, STREAM_WEB_PATH)) {
         xSemaphoreTake(sync_sem, portMAX_DELAY);
-        //xSemaphoreTake(data_mux, portMAX_DELAY);
         MutexLock lock(data_mux);
-        string csv = to_string(gl_status) + ',';
-        csv += to_string(gl_camera_time)     + ',';
-        csv += to_string(gl_inference_time)  + ',';
-        csv += to_string(gl_extraction_time) + ',';
-        csv += to_string(gl_bboxes.size())   + ',';
-        for (size_t i = 0; i < gl_bboxes.size(); i++) {
-            csv += to_string(gl_bboxes[i].score) + ';';
-            csv += to_string(gl_bboxes[i].type)  + ';';
-            csv += to_string(gl_bboxes[i].xmax)  + ';';
-            csv += to_string(gl_bboxes[i].ymax)  + ';';
-            csv += to_string(gl_bboxes[i].xmin)  + ';';
-            csv += to_string(gl_bboxes[i].ymin)  + ';';
+        std::vector<uint8_t> packet;
+        packet.push_back(gl_status + 128);
+        packet.push_back(gl_camera_time);
+        packet.push_back(gl_inference_time);
+        packet.push_back(gl_postprocess_time);
+        packet.push_back(gl_bboxes.size());
+        for (auto bbox : gl_bboxes) {
+            packet.push_back(bbox.score);
+            packet.push_back(bbox.type);
+            int i = packet.size();
+            packet.push_back(bbox.xmax >> 8);
+            packet.push_back(bbox.xmax);
+            packet.push_back(bbox.ymax >> 8);
+            packet.push_back(bbox.ymax);
+            packet.push_back(bbox.xmin >> 8);
+            packet.push_back(bbox.xmin);
+            packet.push_back(bbox.ymin >> 8);
+            packet.push_back(bbox.ymin);
         }
-        csv += ",";
+        packet.push_back(gl_image_size >> 8);
+        packet.push_back(gl_image_size);
+        packet.insert(packet.end(), gl_image.begin(), gl_image.end());
 
-        vector<uint8_t> result(csv.begin(), csv.end());
-        result.reserve(result.size() + gl_image.size());
-        for (size_t i = 0; i < gl_image.size(); i++)
-            result.push_back(gl_image[i]);
-        
-        return result;
+        return packet;
     }
 
     else if (StrEndsWith(uri, DETECTION_STATUS_WEB_PATH)) {
