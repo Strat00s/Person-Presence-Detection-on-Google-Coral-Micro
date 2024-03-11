@@ -30,7 +30,6 @@
 #include "libs/base/reset.h"
 #include "libs/base/mutex.h"
 #include "libs/camera/camera.h"
-#include "libs/libjpeg/jpeg.h"
 #include "libs/tensorflow/utils.h"
 #include "libs/tpu/edgetpu_op.h"
 #include "libs/tpu/edgetpu_manager.h"
@@ -152,24 +151,24 @@ cfg_struct_t buildDefaultConfig() {
     return cfg;
 }
 
-/**
- * @brief Parse raw binary data as config
+/** @brief Parse raw binary data as config
  * 
  * @param raw_data raw config binary
  * @param config where to store final config
  * @return true on success, false otherwise
  */
 bool configFromRaw(std::vector<uint8_t> raw_data, cfg_struct_t *config) {
-    printf("raw_data len: %d\n", raw_data.size());
     //raw config is smaller than minimun size
     if (raw_data.size() < 10 + 4)
         return false;
     
-    int mask_size     = raw_data[0] * raw_data[0];
+    int mask_size = raw_data[0] * raw_data[0];
+
     //reported mask size does not match the raw config size
     if (raw_data.size() != 10 + mask_size)
         return false;
 
+    //copy the data
     config->mask_size   = raw_data[0];
     config->mask_thresh = raw_data[1];
     vector<uint8_t>::const_iterator first = raw_data.begin() + 2;
@@ -186,8 +185,8 @@ bool configFromRaw(std::vector<uint8_t> raw_data, cfg_struct_t *config) {
 
     return true;
 }
-/**
- * @brief create raw binary data from config
+
+/** @brief create raw binary data from config
  * 
  * @param config config to parse
  * @return std::vector<uint8_t> raw binary config data
@@ -209,8 +208,7 @@ std::vector<uint8_t> configToRaw(const cfg_struct_t &config) {
     return raw_data;
 }
 
-/**
- * @brief Write config to file
+/** @brief Write config to file
  * 
  * @param path file path
  * @param raw_cfg raw config binary data
@@ -357,12 +355,13 @@ int postprocessResults(vector<bbox_t> *results, tflite::MicroInterpreter *interp
     int ret = 0;
     bbox_vector_t tmp_results;
     results->clear();
-    size_t cnt = static_cast<int>(count[0]);
+    int cnt = static_cast<int>(count[0]);
     for (int i = 0; i < cnt; ++i) {
         //skip object with id != 0 (not person) and below threshold
         if (ids[i] >= 1 || scores[i] < det_thresh)
             continue;
 
+        //create bbox
         bbox_t bbox = {
             .xmin  = max(0.0f, round(bboxes[4 * i + 1] * gl_image_size)),
             .ymin  = max(0.0f, round(bboxes[4 * i]     * gl_image_size)),
@@ -376,6 +375,7 @@ int postprocessResults(vector<bbox_t> *results, tflite::MicroInterpreter *interp
         if (bbox.ymax >= gl_image_size)
             bbox.ymax = gl_image_size - 1;
 
+        //check dimensions
         if (config.min_as_area) {
             if (config.min_width * config.min_height > (bbox.xmax - bbox.xmin) * (bbox.ymax - bbox.ymin)) {
                 bbox.type = BBOX_SMALL;
@@ -424,7 +424,7 @@ int postprocessResults(vector<bbox_t> *results, tflite::MicroInterpreter *interp
         return ret;
     }
 
-    // order indices to the tmp_results from highest to lowest scores
+    //order indices to the tmp_results from highest to lowest scores
     vector<int> indices(tmp_results.size());
     iota(indices.begin(), indices.end(), 0);
     sort(indices.begin(), indices.end(), [&](int lhs, int rhs) {
@@ -437,10 +437,9 @@ int postprocessResults(vector<bbox_t> *results, tflite::MicroInterpreter *interp
         indices.erase(indices.begin());
         auto current_box = tmp_results[idx];
 
-        // NMS
-        // probably not required as the model has it inside
-        // go through remaining box and check if there are any that overlap with the current box and have lower score
-        for (auto it = indices.begin(); it != indices.end(); ) {
+        //NMS
+        //go through remaining box and check if there are any that overlap with the current box and have lower score
+        for (auto it = indices.begin(); it != indices.end();) {
             //remove index to box that is overlapped or move to next one if not overlapped
             if (IoU(current_box, tmp_results[*it]) > iou_thresh)
                 it = indices.erase(it);
@@ -480,17 +479,20 @@ int postprocessResults(vector<bbox_t> *results, tflite::MicroInterpreter *interp
 
 //Main detect task
 static void detectTask(void *args) {
-    gl_status = 0;
-    gl_image.resize(IMAGE_SIZE);
+    gl_status = 0;                          //set status
+    cfg_struct_t config = gl_config;        //copy current config
+    gl_image.resize(IMAGE_SIZE);            //resize image
+    image_vector_t background(IMAGE_SIZE);  //create background
 
-    cfg_struct_t config = gl_config;
-    image_vector_t background(IMAGE_SIZE);
+    int bckg_upd_cnt = 0;
+
     uint8_t *tensor_input = tflite::GetTensorData<uint8_t>(interpreter->input_tensor(0));
 
+    //create default frame
     CameraFrameFormat frame = {
         CameraFormat::kRgb,
         CameraFilterMethod::kNearestNeighbor,
-        CameraRotation::k270,
+        CameraRotation::k0,
         gl_image_size,
         gl_image_size,
         true,
@@ -498,15 +500,26 @@ static void detectTask(void *args) {
         true
     };
 
-    int bckg_upd_cnt = 0;
-    int inference_time = 0;
+    xSemaphoreGive(sync_sem);   //sync with main task
 
     TickType_t last_wake_time;
     const TickType_t frequency = 50;
 
+    int inference_time = 0;
+
     while (true) {
         vTaskDelayUntil(&last_wake_time, frequency);
 
+        //update config
+        if (gl_update_config) {
+            xSemaphoreTake(config_mux, portMAX_DELAY);
+            config = gl_config;
+            gl_update_config = false;
+            frame.rotation = static_cast<coralmicro::CameraRotation>(gl_config.rotation);
+            xSemaphoreGive(config_mux);
+        }
+
+        //get last image from camera
         int ticks = xTaskGetTickCount();
         int ret = CameraTask::GetSingleton()->GetFrame({frame});
         if (!ret) {
@@ -517,7 +530,7 @@ static void detectTask(void *args) {
         }
         gl_camera_time = xTaskGetTickCount() - ticks;
 
-        // run model
+        //run model
         int inference_ticks = xTaskGetTickCount();
         if (interpreter->Invoke() != kTfLiteOk) {
             printf("Invoke failed\n");
@@ -526,14 +539,6 @@ static void detectTask(void *args) {
             reset();
         }
         gl_inference_time = xTaskGetTickCount() - inference_ticks;
-
-        if (gl_update_config) {
-            xSemaphoreTake(config_mux, portMAX_DELAY);
-            config = gl_config;
-            gl_update_config = false;
-            frame.rotation = static_cast<coralmicro::CameraRotation>(gl_config.rotation);
-            xSemaphoreGive(config_mux);
-        }
 
         //get results from inference and update global variables
         xSemaphoreTake(data_mux, portMAX_DELAY);
@@ -563,10 +568,17 @@ static void detectTask(void *args) {
 
 
 /*----(REQUEST HANDLERS)----*/
+/** @brief GET request handler
+ * 
+ * @param uri URI of the GET request
+ * @return HttpServer::Content
+ */
 HttpServer::Content getUriHandler(const char* uri) {
+    //root
     if (StrEndsWith(uri, "index.shtml") || StrEndsWith(uri, "index.html"))
         return string(MAIN_PAGE_RESPONSE);
 
+    //image and results
     else if (StrEndsWith(uri, STREAM_WEB_PATH)) {
         xSemaphoreTake(sync_sem, portMAX_DELAY);
         MutexLock lock(data_mux);
@@ -581,7 +593,6 @@ HttpServer::Content getUriHandler(const char* uri) {
         for (auto bbox : gl_bboxes) {
             packet.push_back(bbox.score);
             packet.push_back(bbox.type);
-            int i = packet.size();
             packet.push_back(bbox.xmax >> 8);
             packet.push_back(bbox.xmax);
             packet.push_back(bbox.ymax >> 8);
@@ -598,17 +609,20 @@ HttpServer::Content getUriHandler(const char* uri) {
         return packet;
     }
 
+    //detection only
     else if (StrEndsWith(uri, DETECTION_STATUS_WEB_PATH)) {
         vector<uint8_t> status;
         status.push_back(gl_status);
         return status;
     }
 
+    //load config from device
     else if (StrEndsWith(uri, CONFIG_LOAD_WEB_PATH)) {
         MutexLock lock(config_mux);
         return configToRaw(gl_config);
     }
 
+    //reset config
     else if (StrEndsWith(uri, CONFIG_RESET_WEB_PATH)) {
         xSemaphoreTake(config_mux, portMAX_DELAY);
         gl_config = buildDefaultConfig();
@@ -622,6 +636,7 @@ HttpServer::Content getUriHandler(const char* uri) {
         return raw_cfg;
     }
 
+    //POST OK
     else if (StrEndsWith(uri, OK_WEB_PATH)) {
         return string(OK_RESPONSE);
     }
@@ -629,9 +644,15 @@ HttpServer::Content getUriHandler(const char* uri) {
     return {};
 }
 
+/** @brief POST request handler
+ * 
+ * @param uri URI of the POST request
+ * @param payload payload of the POST request
+ * @return string - URI path of OK file on success. Empty otherwise.
+ */
 string postUriHandler(string uri, vector<uint8_t> payload) {
+    //only config save is handled
     if (StrEndsWith(uri, CONFIG_SAVE_WEB_PATH)) {
-        
         xSemaphoreTake(config_mux, portMAX_DELAY);
         if (!configFromRaw(payload, &gl_config)) {
             printf("Invalid config data provided\n");
@@ -646,10 +667,9 @@ string postUriHandler(string uri, vector<uint8_t> payload) {
             return {};
         }
 
-        return string(OK_WEB_PATH);
+        return OK_WEB_PATH;
     }
 
-    printf("unhandled uri: %s\n", uri.c_str());
     return {};
 }
 
@@ -718,15 +738,15 @@ extern "C" [[noreturn]] void app_main(void* param) {
     //Read the model and checks version.
     vector<uint8_t> model_raw;  //entire model is stored in this vector
     if (!LfsReadFile(MODEL_PATH, &model_raw)) {
-        TF_LITE_REPORT_ERROR(&error_reporter, "Failed to load model!");
-        vTaskSuspend(nullptr);
+        printf("Failed to load model\n");
+        exit();
     }
 
-    //confirm model scheme version
+    //confirm model version
     auto* model = tflite::GetModel(model_raw.data());
     if (model->version() != TFLITE_SCHEMA_VERSION) {
-        TF_LITE_REPORT_ERROR(&error_reporter, "Model schema version is %d, supported is %d", model->version(), TFLITE_SCHEMA_VERSION);
-        vTaskSuspend(nullptr);
+        printf("Model version: %ld\nSupported version: %d\n", model->version(), TFLITE_SCHEMA_VERSION);
+        exit();
     }
 
     //create micro interpreter
@@ -735,12 +755,12 @@ extern "C" [[noreturn]] void app_main(void* param) {
     resolver.AddCustom(kCustomOp, RegisterCustomOp());
     interpreter = new tflite::MicroInterpreter(model, resolver, tensor_arena, TENSOR_ARENA_SIZE, &error_reporter);
     if (interpreter->AllocateTensors() != kTfLiteOk) {
-        TF_LITE_REPORT_ERROR(&error_reporter, "AllocateTensors failed.");
-        vTaskSuspend(nullptr);
+        printf("Failed to allocate tensors\n");
+        exit();
     }
 
     if (interpreter->inputs().size() != 1) {
-        printf("ERROR: Model must have only one input tensor\n");
+        printf("Model must have only one input tensor\n");
         exit();
     }
 
@@ -751,15 +771,15 @@ extern "C" [[noreturn]] void app_main(void* param) {
     }
 
     if (interpreter->outputs().size() != 4) {
-        printf("Output size mismatch\\n");
+        printf("Invalid output tensor count\n");
         exit();
     }
 
     //Turn on the TPU and get it's context.
     auto tpu_context = EdgeTpuManager::GetSingleton()->OpenDevice(PerformanceMode::kMax);
     if (!tpu_context) {
-        TF_LITE_REPORT_ERROR(&error_reporter, "ERROR: Failed to get EdgeTpu context!");
-        vTaskSuspend(nullptr);
+        printf("Failed to get TPU context\n");
+        exit();
     }
 
     //start camera
@@ -770,6 +790,7 @@ extern "C" [[noreturn]] void app_main(void* param) {
 
     //start detection task
     xTaskCreate(detectTask, "detect", 16000, nullptr, 4, &detect_task_handle);
+    xSemaphoreTake(sync_sem, portMAX_DELAY);
 
     //skip http server if no internet
     if (!eth_succ)
