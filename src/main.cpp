@@ -85,7 +85,6 @@ using namespace std;
 #define DEFAULT_FP_CHANGE    0
 #define DEFAULT_FP_COUNT     0
 #define DEFAULT_MASK_THRESH  70
-#define DEFAULT_JPEG_QUALITY 70
 #define DEFAULT_MIN_WIDTH    0
 #define DEFAULT_MIN_HEIGHT   0
 #define DEFAULT_MIN_AS_AREA  false
@@ -118,6 +117,7 @@ SemaphoreHandle_t sync_sem;
 TaskHandle_t detect_task_handle;
 
 
+
 /*----(HELPERS)----*/
 void exit() {
     printf("Exiting...\n");
@@ -143,7 +143,6 @@ cfg_struct_t buildDefaultConfig() {
     cfg.iou_thresh   = DEFAULT_IOU_THRESH;
     cfg.fp_change    = DEFAULT_FP_CHANGE;
     cfg.fp_count     = DEFAULT_FP_COUNT;
-    cfg.jpeg_quality = DEFAULT_JPEG_QUALITY;
     cfg.min_width    = DEFAULT_MIN_WIDTH;
     cfg.min_height   = DEFAULT_MIN_HEIGHT;
     cfg.min_as_area  = DEFAULT_MIN_AS_AREA;
