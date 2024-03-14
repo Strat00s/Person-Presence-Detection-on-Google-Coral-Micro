@@ -105,18 +105,18 @@
     </div>
 
     <div class="config-group">
-      <label for="jpeg-quality">Preview quality:</label>
-      <input type="number" id="jpeg-quality" name="jpeg-quality" size="3" maxlength="3" min="5" max="100">
       <label for="preview-size">Preview size:</label>
       <div class="input-wrapper">
-        <input type="number" id="preview-size" name="preview-size" onchange="resizePreview()" size="4" maxlength="4" min="200" max="1000">
+        <input type="number" id="preview-size" name="preview-size" onchange="resizePreview()" size="4" maxlength="4"
+          min="200" max="1000">
         <span>px</span>
       </div>
     </div>
 
     <div class="config-group">
       <label for="mask-size">Mask size:</label>
-      <input type="number" id="mask-size" name="mask-size" onchange="resizeMask()" size="3" maxlength="3" min="2" max="80">
+      <input type="number" id="mask-size" name="mask-size" onchange="resizeMask()" size="3" maxlength="3" min="2"
+        max="80">
 
       <label for="mask-thresh">Uncovered threshold:</label>
       <div class="input-wrapper">
@@ -184,6 +184,36 @@
     </div>
 
     <div class="config-group">
+      <label for="camera-time-field">Capture time:</label>
+      <div class="input-wrapper">
+        <input type="number" id="camera-time-field" name="camera-time-field" size="1" maxlength="1" disabled>
+        <span>ms</span>
+      </div>
+
+      <label for="inference-time-field">Inference time:</label>
+      <div class="input-wrapper">
+        <input type="number" id="inference-time-field" name="inference-time-field" size="1" maxlength="1" disabled>
+        <span>ms</span>
+      </div>
+
+      <label for="postprocess-time-field">Postprocessing time:</label>
+      <div class="input-wrapper">
+        <input type="number" id="postprocess-time-field" name="postprocess-time-field" size="1" maxlength="1" disabled>
+        <span>ms</span>
+      </div>
+
+      <br>
+      <br>
+
+      <label for="total-time-field">Total time:</label>
+      <div class="input-wrapper">
+        <input type="number" id="total-time-field" name="total-time-field" size="1" maxlength="1" disabled>
+        <span>ms</span>
+      </div>
+
+      <br>
+      <br>
+      
       <label for="status-field">Status:</label>
       <input type="number" id="status-field" name="status-field" size="1" maxlength="1" disabled>
     </div>
@@ -192,28 +222,27 @@
 
 
   <script>
-    const imgUrl         = "/camera_stream"; //get
-    const configSaveUrl  = "/config_save"; //get set
-    const configLoadUrl  = "/config_load"; //get set
+    const imgUrl = "/camera_stream"; //get
+    const configSaveUrl = "/config_save"; //get set
+    const configLoadUrl = "/config_load"; //get set
     const configResetUrl = "/config_reset";
-    const statusUrl      = "/detection_status";
+    const statusUrl = "/detection_status";
 
     var previewSize = 500;
-    var maskSize    = 32; //current mask size (cell count per dimension)
-    var maskThresh  = 50;
-    var rotation    = 270;
-    var detThresh   = 50;
-    var iouThresh   = 50;
-    var fpChange    = 0;
-    var fpCount     = 0;
-    var jpegQuality = 70;
-    var minWidth    = 0;
-    var minHeight   = 0;
-    var minAsArea   = false;
+    var maskSize = 32; //current mask size (cell count per dimension)
+    var maskThresh = 50;
+    var rotation = 270;
+    var detThresh = 50;
+    var iouThresh = 50;
+    var fpChange = 0;
+    var fpCount = 0;
+    var minWidth = 0;
+    var minHeight = 0;
+    var minAsArea = false;
 
     var mask;
     var mouseIsDown = false; //Tracks if the mouse is pressed down
-    var toggleDir   = 0;
+    var toggleDir = 0;
 
 
     //start everything important on load
@@ -224,7 +253,7 @@
     }
 
 
-    //Post data to device
+    //post data to device
     function postData(url, type, data) {
       return fetch(url, {
         method: "POST",
@@ -248,8 +277,8 @@
         .catch(error => console.error("Error: ", error))
     }
 
-    //Get data from device
-    function getData(url, isJson) {
+    //get data from device
+    function getData(url) {
       return fetch(url)
         .then(response => {
           //Check if the response is ok (status code 200-299)
@@ -259,7 +288,7 @@
           }
           else
             console.log("Get OK (", response.status, ")");
-          return isJson ? response.json() : response.text();
+          return response.arrayBuffer();
         })
         .catch(error => {
           console.error("Get error: ", error)
@@ -267,7 +296,7 @@
         });
     }
 
-
+    //clamp values between min and max
     function clamp(val, min, max) {
       if (val < min)
         return min;
@@ -276,55 +305,62 @@
       return val;
     }
 
-
+    //update all elements with stored values
     function updateElements() {
-      document.getElementById("mask-size").value       = maskSize;
-      document.getElementById("mask-thresh").value     = maskThresh;
-      document.getElementById("image-rotation").value  = rotation;
-      document.getElementById("det-thresh").value      = detThresh;
-      document.getElementById("iou-thresh").value      = iouThresh;
-      document.getElementById("fp-change").value       = fpChange;
-      document.getElementById("fp-count").value        = fpCount;
-      document.getElementById("jpeg-quality").value    = jpegQuality;
-      document.getElementById("preview-size").value    = previewSize;
-      document.getElementById("min-width").value       = minWidth;
-      document.getElementById("min-height").value      = minHeight;
-      document.getElementById("min-as-area").checked   = minAsArea;
+      document.getElementById("mask-size").value = maskSize;
+      document.getElementById("mask-thresh").value = maskThresh;
+      document.getElementById("image-rotation").value = rotation;
+      document.getElementById("det-thresh").value = detThresh;
+      document.getElementById("iou-thresh").value = iouThresh;
+      document.getElementById("fp-change").value = fpChange;
+      document.getElementById("fp-count").value = fpCount;
+      document.getElementById("preview-size").value = previewSize;
+      document.getElementById("min-width").value = minWidth;
+      document.getElementById("min-height").value = minHeight;
+      document.getElementById("min-as-area").checked = minAsArea;
     }
 
-    //Update all required elements
-    function updateDocument(values) {
-      if (values.length < 11)
-        throw Error("Invalid csv length of ", values.length);
-      maskSize = clamp(Number(values[0]), 2, 80);
+    //update all required elements
+    function updateDocument(rawCfg) {
+      console.log(rawCfg.length);
+      if (rawCfg.length < 14)
+        throw Error("Invalid config length: too small")
+
+      maskSize = rawCfg[0];
+
+      if (rawCfg.length != 10 + maskSize * maskSize)
+        throw Error("Invalid config length: mask size missmatch")
+
+      maskThresh = rawCfg[1];
+      
       createMask();
-      maskThresh = clamp(values[1], 0, 100);
       for (var i = 0; i < maskSize; i++) {
         for (var ii = 0; ii < maskSize; ii++) {
-          mask.val[i][ii] = Number(values[2][i * maskSize + ii]);
+          mask.val[i][ii] = rawCfg[2 + i * maskSize + ii];
           toggleDir = mask.val[i][ii];
           toggleCell(i, ii);
         }
       }
-      rotation    = clamp(Number(values[3]),  0, 270);
-      detThresh   = clamp(Number(values[4]),  0, 100);
-      iouThresh   = clamp(Number(values[5]),  0, 100);
-      fpChange    = clamp(Number(values[6]),  0, 100);
-      fpCount     = clamp(Number(values[7]),  0, 100);
-      jpegQuality = clamp(Number(values[8]),  5, 100);
-      minWidth    = clamp(Number(values[9]),  0, 320);
-      minHeight   = clamp(Number(values[10]), 0, 320);
-      minAsArea   = clamp(Number(values[11]), 0, 1) ? true : false;
+
+      let totalMaskSize = maskSize * maskSize;
+      rotation  = rawCfg[totalMaskSize + 2] * 90;
+      detThresh = rawCfg[totalMaskSize + 3];
+      iouThresh = rawCfg[totalMaskSize + 4];
+      fpChange  = rawCfg[totalMaskSize + 5];
+      fpCount   = rawCfg[totalMaskSize + 6];
+      minWidth  = rawCfg[totalMaskSize + 7];
+      minHeight = rawCfg[totalMaskSize + 8];
+      minAsArea = rawCfg[totalMaskSize + 10] ? true : false;
 
       updateElements()
     }
 
     //load configuration from device
     function loadConfig() {
-      getData(configLoadUrl, false)
-        .then(config => {
+      getData(configLoadUrl)
+        .then(cfgBuffer => {
+          updateDocument(new Uint8Array(cfgBuffer));
           console.log("Config loaded");
-          updateDocument(config.split(","));
         })
         .catch(error => console.error("Failed to load config: ", error));
     }
@@ -338,47 +374,64 @@
         })
       })
       var csv = maskSize.toString() + ",";
-      csv += maskThresh.toString()  + ",";
-      csv += maskVal                + ",";
-      csv += rotation.toString()    + ",";
-      csv += detThresh.toString()   + ",";
-      csv += iouThresh.toString()   + ",";
-      csv += fpChange.toString()    + ",";
-      csv += fpCount.toString()     + ",";
-      csv += jpegQuality.toString() + ',';
-      csv += minWidth.toString()    + ',';
-      csv += minHeight.toString()   + ',';
+      csv += maskThresh.toString() + ",";
+      csv += maskVal + ",";
+      csv += rotation.toString() + ",";
+      csv += detThresh.toString() + ",";
+      csv += iouThresh.toString() + ",";
+      csv += fpChange.toString() + ",";
+      csv += fpCount.toString() + ",";
+      csv += minWidth.toString() + ',';
+      csv += minHeight.toString() + ',';
       csv += minAsArea ? '1' : '0';
       return csv;
     }
 
     //Send and save current configuration to device
     function saveConfig() {
-      maskSize    = clamp(document.getElementById("mask-size").value,      2, 80);
-      maskThresh  = clamp(document.getElementById("mask-thresh").value,    0, 100);
-      rotation    = clamp(document.getElementById("image-rotation").value, 0, 270);
-      detThresh   = clamp(document.getElementById("det-thresh").value,     0, 100);
-      iouThresh   = clamp(document.getElementById("iou-thresh").value,     0, 100);
-      fpChange    = clamp(document.getElementById("fp-change").value,      0, 100);
-      fpCount     = clamp(document.getElementById("fp-count").value,       0, 100);
-      jpegQuality = clamp(document.getElementById("jpeg-quality").value,   5, 100);
-      minWidth    = clamp(document.getElementById("min-width").value,      0, 320);
-      minHeight   = clamp(document.getElementById("min-height").value,     0, 320);
-      minAsArea   = document.getElementById("min-as-area").checked;
+      maskSize   = clamp(document.getElementById("mask-size").value, 2, 80);
+      maskThresh = clamp(document.getElementById("mask-thresh").value, 0, 100);
+      rotation   = clamp(document.getElementById("image-rotation").value, 0, 270);
+      detThresh  = clamp(document.getElementById("det-thresh").value, 0, 100);
+      iouThresh  = clamp(document.getElementById("iou-thresh").value, 0, 100);
+      fpChange   = clamp(document.getElementById("fp-change").value, 0, 100);
+      fpCount    = clamp(document.getElementById("fp-count").value, 0, 100);
+      minWidth   = clamp(document.getElementById("min-width").value, 0, 320);
+      minHeight  = clamp(document.getElementById("min-height").value, 0, 320);
+      minAsArea  = document.getElementById("min-as-area").checked;
       updateElements();
 
-      var csv = csvFromConfig();
-      postData(configSaveUrl, "text/plain", csv)
-        .then(console.log("Config saved:", csv))
+      let totalMaskSize = maskSize * maskSize;
+      let rawCfg = new Uint8Array(10 + totalMaskSize);
+      rawCfg[0] = maskSize;
+      rawCfg[1] = maskThresh;
+      for (var i = 0; i < maskSize; i++) {
+        for (var ii = 0; ii < maskSize; ii++) {
+          rawCfg[2 + i * maskSize + ii] = mask.val[i][ii];
+        }
+      }
+      rawCfg[totalMaskSize + 3] = rotation / 90;
+      rawCfg[totalMaskSize + 4] = detThresh;
+      rawCfg[totalMaskSize + 5] = iouThresh;
+      rawCfg[totalMaskSize + 6] = fpChange;
+      rawCfg[totalMaskSize + 7] = fpCount;
+      rawCfg[totalMaskSize + 8] = minWidth;
+      rawCfg[totalMaskSize + 9] = minHeight;
+      rawCfg[totalMaskSize + 10] = minAsArea ? 1 : 0;
+
+      console.log(rawCfg.byteLength);
+
+      postData(configSaveUrl, "application/octet-stream", rawCfg)
+        .then(console.log("Config saved"))
         .catch(error => console.error("Failed to save config: ", error));
     }
 
     //Request config reset from device
     function resetConfig() {
-      getData(configResetUrl, false)
-        .then(config => {
+      getData(configResetUrl)
+        .then(cfgBuffer => {
+          updateDocument(new Uint8Array(cfgBuffer));
           console.log("Config reset loaded");
-          updateDocument(config.split(","));
         })
         .catch(error => console.error("Failed to reset load config: ", error));
     }
@@ -404,20 +457,17 @@
       reader.onload = function (e) {
         var csv = e.target.result;
         console.log(csv);
-        updateDocument(csv.split(","));
+        updateDocument(csv.split(",")); //TODO fix
       };
 
       reader.onerror = function (e) {
         //Handle errors
         console.error("File could not be loaded: " + e.target.error.code);
       };
-
-      reader.readAsText(file); //Read the file as text
-
     }
 
 
-    //Function to toggle cells
+    //toggle cells when moused over
     function toggleCell(i, j) {
       if (toggleDir)
         mask.elem[i][j].classList.add("toggled");
@@ -427,7 +477,7 @@
       mask.val[i][j] = toggleDir;
     }
 
-    //Un/Hide the mask
+    //un/hide the mask
     function toggleMask() {
       var mask = document.getElementById("gridCanvas");
       if (mask.style.display == "none")
@@ -458,13 +508,13 @@
 
       //remove cells if there are any
       const cells = document.getElementsByClassName("cell");
-      while(cells.length) {
+      while (cells.length) {
         cells[0].parentNode.removeChild(cells[0]);
       }
 
       //create the mask
       mask = {
-        "val":  Array.from({ length: maskSize }, () => new Array(maskSize).fill(0)),
+        "val": Array.from({ length: maskSize }, () => new Array(maskSize).fill(0)),
         "elem": Array.from({ length: maskSize }, () => new Array(maskSize).fill(null))
       };
 
@@ -474,7 +524,7 @@
           const cell = document.createElement("div");
           cell.className = "cell";
           cell.dataset.toggled = false; //Custom attribute to track state
-          cell.style.width  = previewSize / maskSize + "px";
+          cell.style.width = previewSize / maskSize + "px";
           cell.style.height = previewSize / maskSize + "px";
 
           cell.addEventListener("mousedown", function (event) {
@@ -512,14 +562,14 @@
       previewSize = clamp(document.getElementById("preview-size").value, 200, 1000);
       updateElements();
 
-      document.getElementById("gridCanvas").style.width  = previewSize + "px";
+      document.getElementById("gridCanvas").style.width = previewSize + "px";
       document.getElementById("gridCanvas").style.height = previewSize + "px";
-      document.getElementById("stream").width  = previewSize;
+      document.getElementById("stream").width = previewSize;
       document.getElementById("stream").height = previewSize;
 
       var cells = document.getElementsByClassName("cell");
       for (var i = 0; i < cells.length; i++) {
-        cells[i].style.width  = previewSize / maskSize + "px";
+        cells[i].style.width = previewSize / maskSize + "px";
         cells[i].style.height = previewSize / maskSize + "px";
       }
     }
@@ -528,29 +578,93 @@
     async function updatePreview() {
       while (1) {
         try {
-          let arrayBuffer = await fetch(imgUrl).then(resp => resp.arrayBuffer()); //Get image with status
-          let jpegBuffer  = arrayBuffer.slice(0, arrayBuffer.byteLength - 1);      //Slice jpeg from the data
-          let imageBlob   = new Blob([jpegBuffer], { type: "image/jpeg" });
-          let imgElem     = document.getElementById("stream");
+          let arrayBuffer = await getData(imgUrl); //Get image with status
+          let uint8Array = new Uint8Array(arrayBuffer);
+          let dataView = new DataView(arrayBuffer);
 
-          //Revoke the previous object URL to avoid memory leaks
-          if (imgElem.src.startsWith("blob:"))
-            URL.revokeObjectURL(imgElem.src);
+          //get results and status
+          let status          = uint8Array[0] - 128;
+          let cameraTime      = uint8Array[1];
+          let inferenceTime   = uint8Array[2];
+          let postprocessTime = uint8Array[3];
+          let bboxCnt         = uint8Array[4];
+          let bboxes          = Array(0);
+          for (let i = 0; i < bboxCnt; i++) {
+            let score = uint8Array[i * 10 + 0 + 5];
+            let type  = uint8Array[i * 10 + 1 + 5];
+            let xmax  = dataView.getUint16(i * 10 + 2 + 5, false);
+            let ymax  = dataView.getUint16(i * 10 + 4 + 5, false);
+            let xmin  = dataView.getUint16(i * 10 + 6 + 5, false);
+            let ymin  = dataView.getUint16(i * 10 + 8 + 5, false);
+            bboxes.push([score, type, xmax, ymax, xmin, ymin]);
+          }
 
-          imgElem.src    = URL.createObjectURL(imageBlob);
-          imgElem.width  = previewSize;
-          imgElem.height = previewSize;
+          //get the image
+          let imageStart = 5 + bboxCnt * 10 + 2;
+          let imageSize = dataView.getUint16(imageStart - 2);
+          const rawImageData = arrayBuffer.slice(imageStart);      //Slice jpeg from the data
+          let imageDataArray = new Uint8ClampedArray(imageSize * imageSize * 4);
+          // Convert the RGB values to RGBA by adding an alpha value of 255 (fully opaque)
+          for (let i = 0, j = 0; i < imageSize * imageSize * 3; i += 3, j += 4) {
+            imageDataArray[j] = new Uint8Array(rawImageData)[i];     // Red
+            imageDataArray[j + 1] = new Uint8Array(rawImageData)[i + 1]; // Green
+            imageDataArray[j + 2] = new Uint8Array(rawImageData)[i + 2]; // Blue
+            imageDataArray[j + 3] = 255; // Alpha (fully opaque)
+          }
 
-          //Get the last byte as status
-          let statusView = new DataView(arrayBuffer);
-          let status = statusView.getInt8(arrayBuffer.byteLength - 1);
+          //create a canvas for drawing bboxes on the image
+          let canvas = document.createElement('canvas');
+          canvas.width = imageSize;
+          canvas.height = imageSize;
+          let ctx = canvas.getContext('2d');
+          let imageData = new ImageData(imageDataArray, imageSize, imageSize);
+          ctx.putImageData(imageData, 0, 0);
+
+          //draw the boxes with text
+          for (let i = 0; i < bboxes.length; i++) {
+            let color = "red";
+            switch (bboxes[i][1]) {
+              case 1: color = "red";    break;
+              case 2: color = "blue";   break;
+              case 3: color = "yellow"; break;
+              case 4: color = "green";  break;
+            }
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 3;
+
+            let rectWidth  = bboxes[i][2] - bboxes[i][4];
+            let rectHeight = bboxes[i][3] - bboxes[i][5];
+            ctx.strokeRect(bboxes[i][4], bboxes[i][5], rectWidth, rectHeight);
+            ctx.fillStyle = color;
+            ctx.font = "16px Arial";
+            ctx.fillText(String(bboxes[0][0]), bboxes[i][4], bboxes[i][5] - 5);
+          }
+
+          //convert canvas to jpeg blob
+          canvas.toBlob(function (blob) {
+            let imgElem = document.getElementById("stream");
+
+            //revoke the previous blob to avoid memory leaks
+            if (imgElem.src.startsWith('blob:'))
+              URL.revokeObjectURL(imgElem.src);
+
+            imgElem.src = URL.createObjectURL(blob);
+            imgElem.width = previewSize;
+            imgElem.height = previewSize;
+
+          }, 'image/jpeg');
+
           document.getElementById("status-field").value = status;
+          document.getElementById("camera-time-field").value = cameraTime;
+          document.getElementById("inference-time-field").value = inferenceTime;
+          document.getElementById("postprocess-time-field").value = postprocessTime;
+          document.getElementById("total-time-field").value = cameraTime + inferenceTime + postprocessTime;
         } catch (reason) {
           console.error("Error while fetching image: " + reason.toString());
         }
 
-        //Adjust this value as needed for performance and update frequency
-        await sleep(100);
+        //wait
+        await sleep(50);
       }
     }
 

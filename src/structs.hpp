@@ -1,3 +1,13 @@
+/** @file structs.hpp
+ * @author Lukáš Baštýř (l.bastyr@seznam.cz)
+ * @brief 
+ * @version 0.1
+ * @date 10-02-2024
+ * 
+ * @copyright Copyright (c) 2024
+ * 
+ */
+
 #pragma once
 
 #include <vector>
@@ -15,7 +25,6 @@ typedef struct {
     int score;
     int type;
 } bbox_t;
-
 typedef std::vector<bbox_t> bbox_vector_t;
 
 typedef struct{
@@ -27,14 +36,7 @@ typedef struct{
     int iou_thresh;
     int fp_change;
     int fp_count;
-    int jpeg_quality;
     int min_width;
     int min_height;
     bool min_as_area;
 } cfg_struct_t;
-
-typedef struct {
-    int status;
-    image_vector_t image;
-    bbox_vector_t bboxes;
-} web_task_msg_t;

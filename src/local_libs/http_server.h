@@ -1,3 +1,14 @@
+/**
+ * @file http_server.h
+ * @author Lukáš Baštýř (l.bastyr@seznam.cz)
+ * @brief 
+ * @version 0.1
+ * @date 09-03-2024
+ * 
+ * @copyright Copyright (c) 2024
+ * 
+ */
+
 #pragma once
 
 #include <map>
@@ -12,7 +23,7 @@
 using namespace coralmicro;
 
 
-//struct for storing uri and raw payload
+//struct for storing uri and raw payload for specific connection
 typedef struct {
     std::string uri;
     std::vector<uint8_t> payload;
@@ -21,28 +32,21 @@ typedef struct {
 //Http server with post support
 class PostHttpServer : public HttpServer {
   private:
-    std::map<void*, uri_payload_t> payload_buffer;              //payload buffers while processing payloads
-    //std::unordered_set<std::string> post_paths;                 //supported post paths
-    std::string (*postUriHandlerCallback)(std::string uri, std::vector<uint8_t> payload);    //function to call once all data are saved
+    std::map<void*, uri_payload_t> payload_buffer;  //payload buffers for storing connection payloads
+    
+    //post callback
+    using PostUriHandler = std::function<std::string(std::string, std::vector<uint8_t>)>;
+    PostUriHandler post_uri_handler;
 
   public:
-
-    /** @brief Register a callback which will be called on POST finished with URI and payload.
+    /** @brief Register a callback which will be called on POST finished with request URI path and payload.
      * 
-     * @param func Function to call with argument of type uri_payload_t
-     * @return path of a file to be return as a 200 response body. If no path is given (empty string), 404 will be returned instead.
+     * @param handler POST handler callback
+     * @return URI path of a file (must be handled by GET handler) to be returned as response body. Empty string otherwise
      */
-    void registerPostUriHandler(std::string (*func)(std::string, std::vector<uint8_t>)) {
-        postUriHandlerCallback = func;
+    void AddPostUriHandler(PostUriHandler handler) {
+        post_uri_handler = handler;
     }
-
-    /** @brief Add post path for which post are accepted
-     * 
-     * @param post_path supported post path
-     */
-    //void addPostPath(std::string post_path) {
-    //    post_paths.insert(post_path);
-    //}
 
     // Called when an HTTP POST request is first received.
     // This must be implemented by subclasses that want to handle posts.
@@ -67,12 +71,6 @@ class PostHttpServer : public HttpServer {
         (void)response_uri_len;
         (void)post_auto_wnd;
 
-        //post_paths.insert(uri);
-        //if (post_paths.find(uri) == post_paths.end()) {
-        //    printf("unsuported post path\r\n");
-        //    return ERR_ARG;
-        //}
-
         //copy uri and reserver space
         payload_buffer[connection].uri = uri;
         payload_buffer[connection].payload.reserve(content_len);
@@ -89,13 +87,12 @@ class PostHttpServer : public HttpServer {
         (void)connection;
         
         //go through buffers and copy them to main buffer
-        struct pbuf* cp = p;
-        while (cp != nullptr) {
-            uint8_t *byte_payload = static_cast<uint8_t *>(cp->payload);
-            for (int i = 0; i < cp->len; i++)
-                payload_buffer[connection].payload.push_back(byte_payload[i]);
+        struct pbuf* current_pbuf = p;
+        while (current_pbuf != nullptr) {
+            uint8_t *payload = static_cast<uint8_t *>(current_pbuf->payload);
+            payload_buffer[connection].payload.insert(payload_buffer[connection].payload.end(), &payload[0], &payload[current_pbuf->len]);
 
-            cp = p->next;
+            current_pbuf = current_pbuf->next;
         }
 
         pbuf_free(p);
@@ -120,11 +117,11 @@ class PostHttpServer : public HttpServer {
         //'/ok' returns 'ok.html' as urihandler returns it for '/ok' path
 
         //call callback
-        std::string path = postUriHandlerCallback(payload_buffer[connection].uri, payload_buffer[connection].payload);
+        std::string path = post_uri_handler(payload_buffer[connection].uri, payload_buffer[connection].payload);
         if (path.size())
             snprintf(response_uri, response_uri_len, "%s", path.c_str());
 
-        //remove current buffer
+        //remove the now stale buffer
         payload_buffer.erase(connection);
     };
 };

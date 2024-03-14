@@ -1,3 +1,14 @@
+/**
+ * @file main.cpp
+ * @author Lukáš Baštýř (l.bastyr@seznam.cz)
+ * @brief 
+ * @version 1.0
+ * @date 10-11-2023
+ * 
+ * @copyright Copyright (c) 2024
+ * 
+ */
+
 #include <cstdio>
 #include <vector>
 #include <algorithm>
@@ -19,7 +30,6 @@
 #include "libs/base/reset.h"
 #include "libs/base/mutex.h"
 #include "libs/camera/camera.h"
-#include "libs/libjpeg/jpeg.h"
 #include "libs/tensorflow/utils.h"
 #include "libs/tpu/edgetpu_op.h"
 #include "libs/tpu/edgetpu_manager.h"
@@ -38,13 +48,13 @@
 using namespace coralmicro;
 using namespace std;
 
+
 /*----(FUNCTION MACROS)----*/
 #define IMAGE_SIZE gl_image_size * gl_image_size * 3
 
 /*----(WEB RESPONSES)----*/
 #define MAIN_PAGE_RESPONSE "/page.html"
 #define OK_RESPONSE        "/ok.txt"
-#define ERR_RESPONSE       "/err.txt"
 
 /*----(WEB PATHS)----*/
 #define STREAM_WEB_PATH           "/camera_stream"
@@ -53,11 +63,10 @@ using namespace std;
 #define CONFIG_LOAD_WEB_PATH      "/config_load"
 #define CONFIG_RESET_WEB_PATH     "/config_reset"
 #define OK_WEB_PATH               "/ok"
-#define ERR_WEB_PATH              "/err"
 
 /*----(LOCAL FILES)----*/
 #define MODEL_PATH  "/model.tflite"
-#define CONFIG_PATH "/cfg.csv"
+#define NEW_CONFIG_PATH "/cfg.bin"
 
 #define PIN0 kSpiCs
 #define PIN1 kSpiSck
@@ -70,31 +79,33 @@ using namespace std;
 /*----(DEFAULT VALUES)----*/
 #define DEFAULT_IMAGE_SIZE   320
 #define DEFAULT_MASK_SIZE    32
-#define DEFAULT_ROTATION     270
-#define DEFAULT_DET_THRESH   50
-#define DEFAULT_IOU_THRESH   50
+#define DEFAULT_ROTATION     0
+#define DEFAULT_DET_THRESH   25
+#define DEFAULT_IOU_THRESH   25
 #define DEFAULT_FP_CHANGE    0
 #define DEFAULT_FP_COUNT     0
-#define DEFAULT_JPEG_QUALITY 70
 #define DEFAULT_MASK_THRESH  70
 #define DEFAULT_MIN_WIDTH    0
 #define DEFAULT_MIN_HEIGHT   0
 #define DEFAULT_MIN_AS_AREA  false
 
-#define TENSOR_ARENA_SIZE     5700000 //enough from testing
+/*----(TENSOR ARENA)----*/
+#define TENSOR_ARENA_SIZE 5700000 //enough from testing
 STATIC_TENSOR_ARENA_IN_SDRAM(tensor_arena, TENSOR_ARENA_SIZE); //OCRAM is too small for this
 
 
 /*----(TFLITE MICRO)----*/
-//must be global for some reason
 tflite::MicroMutableOpResolver<3> resolver;
 tflite::MicroInterpreter *interpreter;
 tflite::MicroErrorReporter error_reporter;
 
 /*----(SHARED GLOBAL VARIABLES)----*/
-int gl_status = 0;
-int gl_image_size = DEFAULT_IMAGE_SIZE;
-bool gl_update_config = true;
+int gl_status          = 0;
+int gl_image_size      = DEFAULT_IMAGE_SIZE;
+int gl_inference_time  = 0;
+int gl_camera_time     = 0;
+int gl_postprocess_time = 0;
+bool gl_update_config  = true;
 cfg_struct_t gl_config;
 image_vector_t gl_image;
 bbox_vector_t gl_bboxes;
@@ -106,10 +117,19 @@ SemaphoreHandle_t sync_sem;
 TaskHandle_t detect_task_handle;
 
 
+
+/*----(HELPERS)----*/
 void exit() {
     printf("Exiting...\n");
     LedSet(Led::kStatus, false);
     vTaskSuspend(NULL);
+}
+
+void reset() {
+    printf("Restarting...\n");
+    LedSet(Led::kStatus, false);
+    vTaskDelay(500);
+    ResetToFlash();
 }
 
 
@@ -123,7 +143,6 @@ cfg_struct_t buildDefaultConfig() {
     cfg.iou_thresh   = DEFAULT_IOU_THRESH;
     cfg.fp_change    = DEFAULT_FP_CHANGE;
     cfg.fp_count     = DEFAULT_FP_COUNT;
-    cfg.jpeg_quality = DEFAULT_JPEG_QUALITY;
     cfg.min_width    = DEFAULT_MIN_WIDTH;
     cfg.min_height   = DEFAULT_MIN_HEIGHT;
     cfg.min_as_area  = DEFAULT_MIN_AS_AREA;
@@ -131,182 +150,91 @@ cfg_struct_t buildDefaultConfig() {
     return cfg;
 }
 
-/** @brief Generate config from csv
+/** @brief Parse raw binary data as config
  * 
- * @param csv 
- * @param config 
- * @return true on success, false on invalid csv (csv has less tha 8 fields)
+ * @param raw_data raw config binary
+ * @param config where to store final config
+ * @return true on success, false otherwise
  */
-bool configFromCsv(const std::string &csv, cfg_struct_t *config) {
-    if (std::count(csv.begin(), csv.end(), ',') < 11) {
-        printf("invalid csv received\n");
+bool configFromRaw(std::vector<uint8_t> raw_data, cfg_struct_t *config) {
+    //raw config is smaller than minimun size
+    if (raw_data.size() < 10 + 4)
         return false;
-    }
+    
+    int mask_size = raw_data[0] * raw_data[0];
 
-    bool malformed = false;
-    bool finished = false;
-    int field_num = -1;
-    size_t start = 0;
-    size_t end = csv.find(',');
-    cfg_struct_t new_config = buildDefaultConfig();
+    //reported mask size does not match the raw config size
+    if (raw_data.size() != 10 + mask_size)
+        return false;
 
-    while (!finished) {
-        field_num++;
-        if (end == std::string::npos) {
-            finished = true;
-            end = csv.size();
-        }
-        std::string field_val = csv.substr(start, end - start);
+    //copy the data
+    config->mask_size   = raw_data[0];
+    config->mask_thresh = raw_data[1];
+    vector<uint8_t>::const_iterator first = raw_data.begin() + 2;
+    vector<uint8_t>::const_iterator last  = raw_data.begin() + 2 + mask_size;
+    config->mask        = vector<uint8_t>(first, last);
+    config->rotation    = raw_data[mask_size + 3];
+    config->det_thresh  = raw_data[mask_size + 4];
+    config->iou_thresh  = raw_data[mask_size + 5];
+    config->fp_change   = raw_data[mask_size + 6];
+    config->fp_count    = raw_data[mask_size + 7];
+    config->min_width   = raw_data[mask_size + 8];
+    config->min_height  = raw_data[mask_size + 9];
+    config->min_as_area = raw_data[mask_size + 10];
 
-        start = end + 1;
-        end = csv.find(',', start);
-
-        //skip malformed fields
-        if (field_val.size() == 0) {
-            malformed = true;
-            continue;
-        }
-
-        //mask field
-        if (field_num == 2) {
-            new_config.mask.clear();
-            new_config.mask.reserve(field_val.size());
-            for (size_t i = 0; i < field_val.size(); i++)
-                new_config.mask.push_back(field_val[i] == '1');
-            continue;
-        }
-
-        //try to convert the field to number
-        int val = 0;
-        char *endptr;
-        val = std::strtol(field_val.c_str(), &endptr, 10);
-        if (*endptr) {
-            printf("Failed to convert %s to int\n", field_val.c_str());
-            malformed = true;
-            continue;
-        }
-
-        //everything but mask
-        switch (field_num) {
-            case 0:  new_config.mask_size    = val; break;
-            case 1:  new_config.mask_thresh  = val; break;
-            case 3:  new_config.rotation     = val; break;
-            case 4:  new_config.det_thresh   = val; break;
-            case 5:  new_config.iou_thresh   = val; break;
-            case 6:  new_config.fp_change    = val; break;
-            case 7:  new_config.fp_count     = val; break;
-            case 8:  new_config.jpeg_quality = val; break;
-            case 9:  new_config.min_width    = val; break;
-            case 10: new_config.min_height   = val; break;
-            case 11: new_config.min_as_area  = val; break;
-            default: printf("Unhandled field %d: %s\n", field_num, field_val.c_str()); break;
-        }
-    }
-
-    if (malformed)
-        new_config.mask.resize(new_config.mask_size * new_config.mask_size, 0);
-
-    *config = new_config;
     return true;
 }
 
-/** @brief 
+/** @brief create raw binary data from config
  * 
- * @param config 
- * @return std::string 
+ * @param config config to parse
+ * @return std::vector<uint8_t> raw binary config data
  */
-std::string csvFromConfig(const cfg_struct_t &config) {
-    std::string csv = std::to_string(config.mask_size) + ',';
-    csv += std::to_string(config.mask_thresh) + ',';
-    for (auto val: config.mask)
-        csv += std::to_string(val);
-    csv += ',';
-    csv += std::to_string(config.rotation)     + ',';
-    csv += std::to_string(config.det_thresh)   + ',';
-    csv += std::to_string(config.iou_thresh)   + ',';
-    csv += std::to_string(config.fp_change)    + ',';
-    csv += std::to_string(config.fp_count)     + ',';
-    csv += std::to_string(config.jpeg_quality) + ',';
-    csv += std::to_string(config.min_width)    + ',';
-    csv += std::to_string(config.min_height)   + ',';
-    csv += config.min_as_area ? '1' : '0';
-    return csv;
+std::vector<uint8_t> configToRaw(const cfg_struct_t &config) {
+    std::vector<uint8_t> raw_data;
+    raw_data.push_back(config.mask_size);
+    raw_data.push_back(config.mask_thresh);
+    raw_data.insert(raw_data.end(), config.mask.begin(), config.mask.end());
+    raw_data.push_back(config.rotation);
+    raw_data.push_back(config.det_thresh);
+    raw_data.push_back(config.iou_thresh);
+    raw_data.push_back(config.fp_change);
+    raw_data.push_back(config.fp_count);
+    raw_data.push_back(config.min_width);
+    raw_data.push_back(config.min_height);
+    raw_data.push_back(config.min_as_area);
+
+    return raw_data;
 }
 
-/** @brief Write csv config to file
+/** @brief Write config to file
  * 
- * @param csv 
+ * @param path file path
+ * @param raw_cfg raw config binary data
  * @return true on success, false otherwise
  */
-bool writeConfigFile(const std::string &csv) {
-    return LfsWriteFile(CONFIG_PATH, csv);
+bool writeConfigToFile(const char *path, const std::vector<uint8_t> &raw_cfg) {
+    return LfsWriteFile(path, raw_cfg.data(), raw_cfg.size());
 }
 
-/** @brief Read csv config from file
+
+/** @brief Read raw binary config data from file
  * 
- * @return empty string on failure
+ * @param path file path
+ * @return vector<uint8_t> - raw binary config data on success. Empty vector on failure.
  */
-std::string readConfigFile() {
-    std::string config_csv;
-    if (!LfsReadFile(CONFIG_PATH, &config_csv))
+vector<uint8_t> readConfigFromFile(const char *path) {
+    vector<uint8_t> raw_data;
+    if (!LfsReadFile(path, &raw_data))
         return {};
-    return config_csv;
-}
-
-
-/*----(IMAGE DRAWING)----*/
-/** @brief Simple function to draw rectangles into raw picture
- * 
- * @param bbox bounding box to be drawn
- * @param image image to which to draw
- * @param image_size image size
- * @param r red channel value
- * @param g green channel value
- * @param b bluc channel value
- */
-void drawRectangle(bbox_t bbox, image_vector_t *image, int image_size, uint8_t r, uint8_t g, uint8_t b) {
-    if (bbox.xmin < 0)
-        bbox.xmin = 0;
-    if (bbox.ymin < 0)
-        bbox.ymin = 0;
-    if (bbox.xmax > image_size - 1)
-        bbox.xmax = image_size - 1;
-    if (bbox.ymax > image_size - 1)
-        bbox.ymax = image_size - 1;
-
-    //draw top and bottom sides
-    int max_start = (bbox.ymax * image_size + bbox.xmin) * 3;
-    int min_start = (bbox.ymin * image_size + bbox.xmin) * 3;
-    int step = 3;
-    int end = (bbox.xmax - bbox.xmin) * step;
-    for (int i = 0; i < end; i += step) {
-        (*image)[max_start + i]     = r;
-        (*image)[max_start + i + 1] = g;
-        (*image)[max_start + i + 2] = b;
-        (*image)[min_start + i]     = r;
-        (*image)[min_start + i + 1] = g;
-        (*image)[min_start + i + 2] = b;
-    }
-
-    //draw left and right sides
-    max_start = (bbox.ymin * image_size + bbox.xmax) * 3;
-    step = image_size * 3;
-    end = (bbox.ymax - bbox.ymin) * step;
-    for (int i = 0; i < end; i += step) {
-        (*image)[max_start + i]     = r;
-        (*image)[max_start + i + 1] = g;
-        (*image)[max_start + i + 2] = b;
-        (*image)[min_start + i]     = r;
-        (*image)[min_start + i + 1] = g;
-        (*image)[min_start + i + 2] = b;
-    }
+    return raw_data;
 }
 
 
 /*----(MASK HANDLING)----*/
 // Helper function to check if the coordinates are inside the box.
-inline bool isInsideBox(int x, int y, int x_min, int x_max, int y_min, int y_max) {
-    return (x >= x_min && x <= x_max && y >= y_min && y <= y_max);
+inline bool isInsideBox(int x, int y, int xmin, int xmax, int ymin, int ymax) {
+    return (x >= xmin && x <= xmax && y >= ymin && y <= ymax);
 }
 
 /** @brief Check if enough bbox is masked
@@ -365,15 +293,15 @@ bool hasBBoxChanged(const image_vector_t &current_image, const image_vector_t &p
     for (int y = bbox.ymin; y <= bbox.ymax; ++y) {
         for (int x = bbox.xmin; x <= bbox.xmax; ++x) {
             size_t index = (y * image_size + x) * 3;
-            int pixel_change = std::abs(current_image[index] - previous_image[index]) +
-                               std::abs(current_image[index + 1] - previous_image[index + 1]) +
-                               std::abs(current_image[index + 2] - previous_image[index + 2]);
+            int pixel_change = abs(current_image[index] - previous_image[index]) +
+                               abs(current_image[index + 1] - previous_image[index + 1]) +
+                               abs(current_image[index + 2] - previous_image[index + 2]);
             if (pixel_change > 0xFF * 3 * change)
                 changed++;
         }
     }
 
-    return changed > std::round(pixel_cnt * count);
+    return changed > round(pixel_cnt * count);
 }
 
 /** @brief Intersection over union calculations for overlaping bounding boxes
@@ -383,11 +311,11 @@ bool hasBBoxChanged(const image_vector_t &current_image, const image_vector_t &p
  * @return overlap ratio
  */
 float IoU(const bbox_t& a, const bbox_t& b) {
-    float intersectionArea = std::max(0, std::min(a.xmax, b.xmax) - std::max(a.xmin, b.xmin)) *
-                             std::max(0, std::min(a.ymax, b.ymax) - std::max(a.ymin, b.ymin));
-    float unionArea = (a.xmax - a.xmin) * (a.ymax - a.ymin) +
-                      (b.xmax - b.xmin) * (b.ymax - b.ymin) - intersectionArea;
-    return intersectionArea / unionArea;
+    float int_area = max(0, min(a.xmax, b.xmax) - max(a.xmin, b.xmin)) *
+                     max(0, min(a.ymax, b.ymax) - max(a.ymin, b.ymin));
+    float un_area = (a.xmax - a.xmin) * (a.ymax - a.ymin) +
+                    (b.xmax - b.xmin) * (b.ymax - b.ymin) - int_area;
+    return int_area / un_area;
 }
 
 /** @brief Get results from inference.
@@ -406,7 +334,7 @@ float IoU(const bbox_t& a, const bbox_t& b) {
  * 2 if something is/was detected and is/was unmasked in last 5 frames.
  * 3 if something is detected, is unmasked and is detected in the last 3 out of 5 frames.
  */
-int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpreter,
+int postprocessResults(vector<bbox_t> *results, tflite::MicroInterpreter *interpreter,
                const image_vector_t &image, const image_vector_t &background, const cfg_struct_t &config) {
 
     static int consec_unmasked = 0; //keeps count of consecutive unmasked detections
@@ -426,18 +354,19 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
     int ret = 0;
     bbox_vector_t tmp_results;
     results->clear();
-    size_t cnt = static_cast<int>(count[0]);
+    int cnt = static_cast<int>(count[0]);
     for (int i = 0; i < cnt; ++i) {
         //skip object with id != 0 (not person) and below threshold
-        if (std::round(ids[i]) || scores[i] < det_thresh)
+        if (ids[i] >= 1 || scores[i] < det_thresh)
             continue;
 
+        //create bbox
         bbox_t bbox = {
-            .xmin  = std::max(0.0f, std::round(bboxes[4 * i + 1] * gl_image_size)),
-            .ymin  = std::max(0.0f, std::round(bboxes[4 * i]     * gl_image_size)),
-            .xmax  = std::max(0.0f, std::round(bboxes[4 * i + 3] * gl_image_size)),
-            .ymax  = std::max(0.0f, std::round(bboxes[4 * i + 2] * gl_image_size)),
-            .score = std::round(scores[i] * 100),
+            .xmin  = max(0.0f, round(bboxes[4 * i + 1] * gl_image_size)),
+            .ymin  = max(0.0f, round(bboxes[4 * i]     * gl_image_size)),
+            .xmax  = max(0.0f, round(bboxes[4 * i + 3] * gl_image_size)),
+            .ymax  = max(0.0f, round(bboxes[4 * i + 2] * gl_image_size)),
+            .score = round(scores[i] * 100),
             .type  = BBOX_MASKED
         };
         if (bbox.xmax >= gl_image_size)
@@ -445,6 +374,7 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
         if (bbox.ymax >= gl_image_size)
             bbox.ymax = gl_image_size - 1;
 
+        //check dimensions
         if (config.min_as_area) {
             if (config.min_width * config.min_height > (bbox.xmax - bbox.xmin) * (bbox.ymax - bbox.ymin)) {
                 bbox.type = BBOX_SMALL;
@@ -460,6 +390,8 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
 
         tmp_results.push_back(bbox);
     }
+
+    printf("Prelimenary results: %d\n", tmp_results.size());
 
     //nothing valid detected
     if (!tmp_results.size()) {
@@ -491,10 +423,10 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
         return ret;
     }
 
-    // order indices to the tmp_results from highest to lowest scores
-    std::vector<int> indices(tmp_results.size());
-    std::iota(indices.begin(), indices.end(), 0);
-    std::sort(indices.begin(), indices.end(), [&](int lhs, int rhs) {
+    //order indices to the tmp_results from highest to lowest scores
+    vector<int> indices(tmp_results.size());
+    iota(indices.begin(), indices.end(), 0);
+    sort(indices.begin(), indices.end(), [&](int lhs, int rhs) {
         return tmp_results[lhs].score > tmp_results[rhs].score;
     });
 
@@ -504,10 +436,9 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
         indices.erase(indices.begin());
         auto current_box = tmp_results[idx];
 
-        // NMS
-        // probably not required as the model has it inside
-        // go through remaining box and check if there are any that overlap with the current box and have lower score
-        for (auto it = indices.begin(); it != indices.end(); ) {
+        //NMS
+        //go through remaining box and check if there are any that overlap with the current box and have lower score
+        for (auto it = indices.begin(); it != indices.end();) {
             //remove index to box that is overlapped or move to next one if not overlapped
             if (IoU(current_box, tmp_results[*it]) > iou_thresh)
                 it = indices.erase(it);
@@ -544,22 +475,23 @@ int getResults(std::vector<bbox_t> *results, tflite::MicroInterpreter *interpret
 }
 
 
+
 //Main detect task
 static void detectTask(void *args) {
-    int ret;
+    gl_status = 0;                          //set status
+    cfg_struct_t config = gl_config;        //copy current config
+    gl_image.resize(IMAGE_SIZE);            //resize image
+    image_vector_t background(IMAGE_SIZE);  //create background
+
     int bckg_upd_cnt = 0;
 
-    gl_status = 0;
-    gl_image.resize(IMAGE_SIZE);
-
-    cfg_struct_t config = gl_config;
-    image_vector_t background(IMAGE_SIZE);
     uint8_t *tensor_input = tflite::GetTensorData<uint8_t>(interpreter->input_tensor(0));
 
+    //create default frame
     CameraFrameFormat frame = {
         CameraFormat::kRgb,
         CameraFilterMethod::kNearestNeighbor,
-        CameraRotation::k270,
+        CameraRotation::k0,
         gl_image_size,
         gl_image_size,
         true,
@@ -567,55 +499,58 @@ static void detectTask(void *args) {
         true
     };
 
-    int inference_time = 0;
+    xSemaphoreGive(sync_sem);   //sync with main task
 
     TickType_t last_wake_time;
     const TickType_t frequency = 50;
+
+    int inference_time = 0;
+
     while (true) {
         vTaskDelayUntil(&last_wake_time, frequency);
 
-        int ticks = xTaskGetTickCount();
-        ret = CameraTask::GetSingleton()->GetFrame({frame});
-        if (!ret) {
-            printf("Failed to get image from camera.\r\n");
-            gl_status = -1;
-            xSemaphoreGive(sync_sem);
-            vTaskDelay(500);
-            ResetToFlash();
-        }
-        
-        // run model
-        if (interpreter->Invoke() != kTfLiteOk) {
-            printf("Invoke failed\n");
-            gl_status = -2;
-            xSemaphoreGive(sync_sem);
-            vTaskDelay(500);
-            ResetToFlash();
-        }
-
+        //update config
         if (gl_update_config) {
             xSemaphoreTake(config_mux, portMAX_DELAY);
             config = gl_config;
             gl_update_config = false;
-            switch (gl_config.rotation) {
-                case 0:   frame.rotation = CameraRotation::k0;   break;
-                case 90:  frame.rotation = CameraRotation::k90;  break;
-                case 180: frame.rotation = CameraRotation::k180; break;
-                case 270: frame.rotation = CameraRotation::k270; break;
-            }
+            frame.rotation = static_cast<coralmicro::CameraRotation>(gl_config.rotation);
             xSemaphoreGive(config_mux);
         }
 
+        //get last image from camera
+        int ticks = xTaskGetTickCount();
+        int ret = CameraTask::GetSingleton()->GetFrame({frame});
+        if (!ret) {
+            printf("Failed to get image from camera.\r\n");
+            gl_status = -1;
+            xSemaphoreGive(sync_sem);
+            reset();
+        }
+        gl_camera_time = xTaskGetTickCount() - ticks;
+
+        //run model
+        int inference_ticks = xTaskGetTickCount();
+        if (interpreter->Invoke() != kTfLiteOk) {
+            printf("Invoke failed\n");
+            gl_status = -2;
+            xSemaphoreGive(sync_sem);
+            reset();
+        }
+        gl_inference_time = xTaskGetTickCount() - inference_ticks;
+
         //get results from inference and update global variables
         xSemaphoreTake(data_mux, portMAX_DELAY);
+        int extract_time = xTaskGetTickCount();
         gl_image = image_vector_t(tensor_input, tensor_input + IMAGE_SIZE);
-        gl_status = getResults(&gl_bboxes, interpreter, gl_image, background, config);
+        gl_status = postprocessResults(&gl_bboxes, interpreter, gl_image, background, config);
+        gl_postprocess_time = xTaskGetTickCount() - extract_time;
         xSemaphoreGive(data_mux);
         xSemaphoreGive(sync_sem);   //sync with web task (if it is waiting for us)
 
-        //toggle led and pins of detection
+        //toggle led and pins
         LedSet(Led::kUser, gl_status > 2);
-        GpioSet(PIN0, gl_status < 3 && gl_status > 1);
+        GpioSet(PIN0, gl_status < 3 && gl_status > 0);
         GpioSet(PIN1, gl_status > 2);
 
         //update background
@@ -631,82 +566,109 @@ static void detectTask(void *args) {
 }
 
 
-/*----(WEB HADNLING)----*/
-HttpServer::Content UriHandler(const char* uri) {
+/*----(REQUEST HANDLERS)----*/
+/** @brief GET request handler
+ * 
+ * @param uri URI of the GET request
+ * @return HttpServer::Content
+ */
+HttpServer::Content getUriHandler(const char* uri) {
+    //root
     if (StrEndsWith(uri, "index.shtml") || StrEndsWith(uri, "index.html"))
-        return std::string(MAIN_PAGE_RESPONSE);
+        return string(MAIN_PAGE_RESPONSE);
 
+    //image and results
     else if (StrEndsWith(uri, STREAM_WEB_PATH)) {
         xSemaphoreTake(sync_sem, portMAX_DELAY);
-        xSemaphoreTake(data_mux, portMAX_DELAY);
-        for (size_t i = 0; i < gl_bboxes.size(); i++) {
-            switch (gl_bboxes[i].type) {
-                case BBOX_SMALL:    drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 255,   0,   0); break;
-                case BBOX_MASKED:   drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 0,     0, 255); break;
-                case BBOX_UNSURE:   drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 255, 255,   0); break;
-                case BBOX_UNMASKED: drawRectangle(gl_bboxes[i], &gl_image, gl_image_size, 0,   255,   0); break;
-            }
-        }
+        MutexLock lock(data_mux);
 
-        //not raw jpeg. Last byte is detection gl_status
-        image_vector_t jpeg;
-        JpegCompressRgb(gl_image.data(), gl_image_size, gl_image_size, gl_config.jpeg_quality, &jpeg);
-        jpeg.push_back(gl_status);
-        xSemaphoreGive(data_mux);
-        return jpeg;
+        //create packet with status, results and image and send it
+        std::vector<uint8_t> packet;
+        packet.push_back(gl_status + 128);
+        packet.push_back(gl_camera_time);
+        packet.push_back(gl_inference_time);
+        packet.push_back(gl_postprocess_time);
+        packet.push_back(gl_bboxes.size());
+        for (auto bbox : gl_bboxes) {
+            packet.push_back(bbox.score);
+            packet.push_back(bbox.type);
+            packet.push_back(bbox.xmax >> 8);
+            packet.push_back(bbox.xmax);
+            packet.push_back(bbox.ymax >> 8);
+            packet.push_back(bbox.ymax);
+            packet.push_back(bbox.xmin >> 8);
+            packet.push_back(bbox.xmin);
+            packet.push_back(bbox.ymin >> 8);
+            packet.push_back(bbox.ymin);
+        }
+        packet.push_back(gl_image_size >> 8);
+        packet.push_back(gl_image_size);
+        packet.insert(packet.end(), gl_image.begin(), gl_image.end());
+
+        return packet;
     }
 
+    //detection only
     else if (StrEndsWith(uri, DETECTION_STATUS_WEB_PATH)) {
-        std::vector<uint8_t> status;
+        vector<uint8_t> status;
         status.push_back(gl_status);
         return status;
     }
 
+    //load config from device
     else if (StrEndsWith(uri, CONFIG_LOAD_WEB_PATH)) {
-        xSemaphoreTake(config_mux, portMAX_DELAY);
-        std::string csv = csvFromConfig(gl_config);
-        xSemaphoreGive(config_mux);
-        return std::vector<uint8_t>(csv.begin(), csv.end());
+        MutexLock lock(config_mux);
+        return configToRaw(gl_config);
     }
 
+    //reset config
     else if (StrEndsWith(uri, CONFIG_RESET_WEB_PATH)) {
         xSemaphoreTake(config_mux, portMAX_DELAY);
         gl_config = buildDefaultConfig();
-        std::string csv = csvFromConfig(gl_config);
         gl_update_config = true;
+        auto raw_cfg = configToRaw(gl_config);
         xSemaphoreGive(config_mux);
-        if (!writeConfigFile(csv)) {
+
+        if (!writeConfigToFile(NEW_CONFIG_PATH, raw_cfg))
             printf("Failed to write reset config to file\n");
-        }
-        return std::vector<uint8_t>(csv.begin(), csv.end());
+
+        return raw_cfg;
     }
 
+    //POST OK
     else if (StrEndsWith(uri, OK_WEB_PATH)) {
-        return std::string(OK_RESPONSE);
+        return string(OK_RESPONSE);
     }
 
     return {};
 }
 
-std::string postUriHandler(std::string uri, std::vector<uint8_t> payload) {
+/** @brief POST request handler
+ * 
+ * @param uri URI of the POST request
+ * @param payload payload of the POST request
+ * @return string - URI path of OK file on success. Empty otherwise.
+ */
+string postUriHandler(string uri, vector<uint8_t> payload) {
+    //only config save is handled
     if (StrEndsWith(uri, CONFIG_SAVE_WEB_PATH)) {
-        std::string csv = std::string(payload.begin(), payload.end());
-
         xSemaphoreTake(config_mux, portMAX_DELAY);
-        if (!configFromCsv(csv, &gl_config)) {
-            printf("Invalid CSV provided\n");
+        if (!configFromRaw(payload, &gl_config)) {
+            printf("Invalid config data provided\n");
+            xSemaphoreGive(config_mux);
+            return {};
         }
         gl_update_config = true;
         xSemaphoreGive(config_mux);
 
-        if (!writeConfigFile(csv)) {
-            printf("Failed to write csv to file\n");
+        if (!writeConfigToFile(NEW_CONFIG_PATH, payload)) {
+            printf("Failed to write config to file\n");
             return {};
         }
-        return std::string(OK_WEB_PATH);
+
+        return OK_WEB_PATH;
     }
 
-    printf("unhandled uri: %s\n", uri.c_str());
     return {};
 }
 
@@ -719,11 +681,11 @@ extern "C" [[noreturn]] void app_main(void* param) {
     GpioSetMode(PIN0, GpioMode::kOutput);
     GpioSetMode(PIN1, GpioMode::kOutput);
 
+
     config_mux = xSemaphoreCreateMutex();
     data_mux   = xSemaphoreCreateMutex();
     sync_sem   = xSemaphoreCreateBinary();
 
-    vTaskDelay(2000);
 
     auto reset_stats = ResetGetStats();
     printf("Reset stats:\n");
@@ -731,24 +693,24 @@ extern "C" [[noreturn]] void app_main(void* param) {
     printf("  wdog cnt:   %ld\n", reset_stats.watchdog_resets);
     printf("  lockup cnt: %ld\n", reset_stats.lockup_resets);
 
-    //TODO custom tighter watchdog
+
     WatchdogStart({
         .timeout_s = 2,
         .pet_rate_s = 1,
         .enable_irq = false
     });
 
+
     //load config
-    std::string csv = readConfigFile();
+    auto raw_cfg = readConfigFromFile(NEW_CONFIG_PATH);
     //empty/non-existant file or malformed csv
-    if (!csv.size() || !configFromCsv(csv, &gl_config)) {
+    if (!raw_cfg.size() || !configFromRaw(raw_cfg, &gl_config)) {
         gl_config = buildDefaultConfig();
-        if (!writeConfigFile(csvFromConfig(gl_config))) {
-            printf("Failed to write config file\n");
-            vTaskDelay(500);
-            ResetToFlash();
+        if (!writeConfigToFile(NEW_CONFIG_PATH, configToRaw(gl_config))) {
+            printf("Failed to write config to file\n");
+            reset();
         }
-        printf("Config regenerated\n");
+        printf("Default config generated\n");
     }
     else
         printf("Config loaded from file\n");
@@ -759,7 +721,7 @@ extern "C" [[noreturn]] void app_main(void* param) {
     bool eth_succ = EthernetInit(true);
     if (!eth_succ) {
         printf("Failed to init ethernet\n");
-        ResetToFlash();
+        reset();
     }
     else {
         auto ip_addr = EthernetGetIp();
@@ -773,17 +735,17 @@ extern "C" [[noreturn]] void app_main(void* param) {
 
 
     //Read the model and checks version.
-    std::vector<uint8_t> model_raw;  //entire model is stored in this vector
+    vector<uint8_t> model_raw;  //entire model is stored in this vector
     if (!LfsReadFile(MODEL_PATH, &model_raw)) {
-        TF_LITE_REPORT_ERROR(&error_reporter, "Failed to load model!");
-        vTaskSuspend(nullptr);
+        printf("Failed to load model\n");
+        exit();
     }
 
-    //confirm model scheme version
+    //confirm model version
     auto* model = tflite::GetModel(model_raw.data());
     if (model->version() != TFLITE_SCHEMA_VERSION) {
-        TF_LITE_REPORT_ERROR(&error_reporter, "Model schema version is %d, supported is %d", model->version(), TFLITE_SCHEMA_VERSION);
-        vTaskSuspend(nullptr);
+        printf("Model version: %ld\nSupported version: %d\n", model->version(), TFLITE_SCHEMA_VERSION);
+        exit();
     }
 
     //create micro interpreter
@@ -792,12 +754,12 @@ extern "C" [[noreturn]] void app_main(void* param) {
     resolver.AddCustom(kCustomOp, RegisterCustomOp());
     interpreter = new tflite::MicroInterpreter(model, resolver, tensor_arena, TENSOR_ARENA_SIZE, &error_reporter);
     if (interpreter->AllocateTensors() != kTfLiteOk) {
-        TF_LITE_REPORT_ERROR(&error_reporter, "AllocateTensors failed.");
-        vTaskSuspend(nullptr);
+        printf("Failed to allocate tensors\n");
+        exit();
     }
 
     if (interpreter->inputs().size() != 1) {
-        printf("ERROR: Model must have only one input tensor\n");
+        printf("Model must have only one input tensor\n");
         exit();
     }
 
@@ -808,15 +770,15 @@ extern "C" [[noreturn]] void app_main(void* param) {
     }
 
     if (interpreter->outputs().size() != 4) {
-        printf("Output size mismatch\\n");
+        printf("Invalid output tensor count\n");
         exit();
     }
 
     //Turn on the TPU and get it's context.
     auto tpu_context = EdgeTpuManager::GetSingleton()->OpenDevice(PerformanceMode::kMax);
     if (!tpu_context) {
-        TF_LITE_REPORT_ERROR(&error_reporter, "ERROR: Failed to get EdgeTpu context!");
-        vTaskSuspend(nullptr);
+        printf("Failed to get TPU context\n");
+        exit();
     }
 
     //start camera
@@ -827,6 +789,7 @@ extern "C" [[noreturn]] void app_main(void* param) {
 
     //start detection task
     xTaskCreate(detectTask, "detect", 16000, nullptr, 4, &detect_task_handle);
+    xSemaphoreTake(sync_sem, portMAX_DELAY);
 
     //skip http server if no internet
     if (!eth_succ)
@@ -834,8 +797,8 @@ extern "C" [[noreturn]] void app_main(void* param) {
 
     //start http server
     PostHttpServer http_server;
-    http_server.registerPostUriHandler(postUriHandler);
-    http_server.AddUriHandler(UriHandler);
+    http_server.AddUriHandler(getUriHandler);
+    http_server.AddPostUriHandler(postUriHandler);
     UseHttpServer(&http_server);
 
     vTaskSuspend(nullptr);
