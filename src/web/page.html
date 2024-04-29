@@ -179,26 +179,26 @@
 
     <div class="config-group">
       <button id="saveToFileBtn" onclick="downloadConfig()">Download configuration</button>
-      <input type="file" id="file-input" style="display: none;" onchange="uploadConfig()" />
       <button id="loadFromFileBtn" onclick="document.getElementById('file-input').click()">Upload configuration</button>
+      <input type="file" id="file-input" style="display: none;" onchange="uploadConfig(this)"/>
     </div>
 
     <div class="config-group">
       <label for="camera-time-field">Capture time:</label>
       <div class="input-wrapper">
-        <input type="number" id="camera-time-field" name="camera-time-field" size="1" maxlength="1" disabled>
+        <input type="number" id="camera-time-field" name="camera-time-field" style="width: 6ch" disabled>
         <span>ms</span>
       </div>
 
       <label for="inference-time-field">Inference time:</label>
       <div class="input-wrapper">
-        <input type="number" id="inference-time-field" name="inference-time-field" size="1" maxlength="1" disabled>
+        <input type="number" id="inference-time-field" name="inference-time-field" style="width: 6ch" disabled>
         <span>ms</span>
       </div>
 
       <label for="postprocess-time-field">Postprocessing time:</label>
       <div class="input-wrapper">
-        <input type="number" id="postprocess-time-field" name="postprocess-time-field" size="1" maxlength="1" disabled>
+        <input type="number" id="postprocess-time-field" name="postprocess-time-field" style="width: 6ch" disabled>
         <span>ms</span>
       </div>
 
@@ -207,7 +207,7 @@
 
       <label for="total-time-field">Total time:</label>
       <div class="input-wrapper">
-        <input type="number" id="total-time-field" name="total-time-field" size="1" maxlength="1" disabled>
+        <input type="number" id="total-time-field" name="total-time-field" style="width: 6ch" disabled>
         <span>ms</span>
       </div>
 
@@ -215,7 +215,7 @@
       <br>
       
       <label for="status-field">Status:</label>
-      <input type="number" id="status-field" name="status-field" size="1" maxlength="1" disabled>
+      <input type="number" id="status-field" name="status-field" style="width: 4ch" disabled>
     </div>
 
   </div>
@@ -355,6 +355,39 @@
       updateElements()
     }
 
+    function updateDocumentCSV(csvCfg) {
+      cfgArray = csvCfg.split(",");
+      if (cfgArray.length < 12)
+        throw Error("Invalid config length: too small")
+
+      previewSize = Number(cfgArray[0]);
+      maskSize    = Number(cfgArray[1]);
+      if (cfgArray[2].length != maskSize * maskSize)
+        throw Error("Invalid config length: mask size missmatch")
+
+      createMask();
+      for (var i = 0; i < maskSize; i++) {
+        for (var ii = 0; ii < maskSize; ii++) {
+          mask.val[i][ii] = cfgArray[2][i * maskSize + ii] == "1" ? 1 : 0;
+          toggleDir = mask.val[i][ii];
+          toggleCell(i, ii);
+        }
+      }
+
+      maskThresh  = Number(cfgArray[3]);
+      rotation    = Number(cfgArray[4]);
+      detThresh   = Number(cfgArray[5]);
+      iouThresh   = Number(cfgArray[6]);
+      fpChange    = Number(cfgArray[7]);
+      fpCount     = Number(cfgArray[8]);
+      minWidth    = Number(cfgArray[9]);
+      minHeight   = Number(cfgArray[10]);
+      minAsArea   = cfgArray[11] == "1";
+
+      updateElements();
+      resizePreview();
+    }
+
     //load configuration from device
     function loadConfig() {
       getData(configLoadUrl)
@@ -363,28 +396,6 @@
           console.log("Config loaded");
         })
         .catch(error => console.error("Failed to load config: ", error));
-    }
-
-    //Build csv from local configuration
-    function csvFromConfig() {
-      let maskVal = "";
-      mask.val.forEach(row => {
-        row.forEach(item => {
-          maskVal += item.toString();
-        })
-      })
-      var csv = maskSize.toString() + ",";
-      csv += maskThresh.toString() + ",";
-      csv += maskVal + ",";
-      csv += rotation.toString() + ",";
-      csv += detThresh.toString() + ",";
-      csv += iouThresh.toString() + ",";
-      csv += fpChange.toString() + ",";
-      csv += fpCount.toString() + ",";
-      csv += minWidth.toString() + ',';
-      csv += minHeight.toString() + ',';
-      csv += minAsArea ? '1' : '0';
-      return csv;
     }
 
     //Send and save current configuration to device
@@ -436,6 +447,30 @@
         .catch(error => console.error("Failed to reset load config: ", error));
     }
 
+
+    //Build csv from local configuration
+    function csvFromConfig() {
+      let maskVal = "";
+      mask.val.forEach(row => {
+        row.forEach(item => {
+          maskVal += item.toString();
+        })
+      })
+      var csv = previewSize.toString() + ",";
+      csv += maskSize.toString()    + ",";
+      csv += maskVal + ",";
+      csv += maskThresh.toString()  + ",";
+      csv += rotation.toString()    + ",";
+      csv += detThresh.toString()   + ",";
+      csv += iouThresh.toString()   + ",";
+      csv += fpChange.toString()    + ",";
+      csv += fpCount.toString()     + ",";
+      csv += minWidth.toString()    + ",";
+      csv += minHeight.toString()   + ",";
+      csv += minAsArea ? "1" : "0";
+      return csv;
+    }
+
     //Download local config to file as csv
     function downloadConfig() {
       var csv = csvFromConfig();
@@ -449,21 +484,26 @@
     }
 
     //Upload a csv file as config
-    function uploadConfig() {
-      var fileInput = document.getElementById("file-input");
-      var file = fileInput.files[0]; //Get the file
+    function uploadConfig(input) {
+      console.log("uploadcfg");
+      if (!input.files || !input.files[0])
+        return;
+
       var reader = new FileReader();
 
       reader.onload = function (e) {
-        var csv = e.target.result;
-        console.log(csv);
-        updateDocument(csv.split(",")); //TODO fix
+        console.log("Uploaded config: ");
+        console.log(e.target.result);
+        updateDocumentCSV(e.target.result);
+        input.value = '';
       };
 
       reader.onerror = function (e) {
         //Handle errors
         console.error("File could not be loaded: " + e.target.error.code);
       };
+
+      reader.readAsText(input.files[0]);
     }
 
 
