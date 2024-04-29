@@ -6,3 +6,10 @@ It uses an SSDLite MobileDet Tensorflow-lite model for detecting objects in imag
 The final device used is an unmodified Coral Dev Board Micro with a POE add-on board for internet access. It contains a TPU (Tensor Processor Unit) for inference acceleration and is thus a great option for this project.
 
 The device can be configured through a simple web UI, which allows one to mask parts of the image where detection is not required/wanted, change the confidence threshold, bounding box overlap threshold, and multiple anti-false-positive measures for more reliable detection.
+
+
+### How to install
+1. Get a Linux machine.
+2. Download/Clone the repository.
+3. Run `init.sh` and follow the instructions (requires root when running coralmicro setup).
+4. Run `run_all.sh reflash` to build the program, flash it to the board and monitor its serial output.
