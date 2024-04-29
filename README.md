@@ -8,7 +8,7 @@ The final device used is an unmodified Coral Dev Board Micro with a POE add-on b
 The device can be configured through a simple web UI, which allows one to mask parts of the image where detection is not required/wanted, change the confidence threshold, bounding box overlap threshold, and multiple anti-false-positive measures for more reliable detection.
 
 
-### How to install
+### Running it on the Coralmicro
 1. Get a Linux machine.
 2. Download/Clone the repository.
 3. Run `init.sh` and follow the instructions (requires root when running coralmicro setup).
