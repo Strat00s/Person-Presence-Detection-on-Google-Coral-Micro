@@ -1,7 +1,7 @@
 /** @file structs.hpp
- * @author Lukáš Baštýř (l.bastyr@seznam.cz)
- * @brief 
- * @version 0.1
+ * @author Lukáš Baštýř (l.bastyr@seznam.cz, 492875@muni.cz)
+ * @brief Main structs used in this project
+
  * @date 10-02-2024
  * 
  * @copyright Copyright (c) 2024
