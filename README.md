@@ -10,6 +10,7 @@ The device can be configured through a simple web UI, which allows one to mask p
 
 ### Running it on the Coralmicro
 1. Get a Linux machine.
-2. Download/Clone the repository.
-3. Run `scripts/init.sh` and follow the instructions (requires root when running coralmicro setup).
-4. Run `scripts/run_all.sh reflash` to build the program, flash it to the board and monitor its serial output.
+2. Install required dependencies: Python3, git, wget, plink
+3. Download/Clone the repository.
+4. Run `scripts/init.sh` and follow the instructions (requires root when running coralmicro setup).
+5. Run `scripts/run_all.sh reflash` to build the program, flash it (and all required files) to the board and monitor its serial output.
