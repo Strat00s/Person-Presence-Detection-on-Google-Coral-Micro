@@ -1,8 +1,7 @@
 /**
  * @file http_server.h
- * @author Lukáš Baštýř (l.bastyr@seznam.cz)
- * @brief 
- * @version 0.1
+ * @author Lukáš Baštýř (l.bastyr@seznam.cz, 492875@muni.cz)
+ * @brief http server with post support
  * @date 09-03-2024
  * 
  * @copyright Copyright (c) 2024
