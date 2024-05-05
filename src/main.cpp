@@ -1,11 +1,10 @@
 /**
  * @file main.cpp
- * @author Lukáš Baštýř (l.bastyr@seznam.cz)
- * @brief 
- * @version 1.0
+ * @author Lukáš Baštýř (l.bastyr@seznam.cz, 492875@muni.cz)
+ * @brief A program for person presence detection in configurable area
  * @date 10-11-2023
  * 
- * @copyright Copyright (c) 2024
+ * @copyright Copyright (c) 2023
  * 
  */
 
@@ -18,14 +17,11 @@
 #include <cstdarg>
 #include <cstdlib>
 
-#include "libs/base/http_server.h"
 #include "libs/base/led.h"
 #include "libs/base/strings.h"
-#include "libs/base/utils.h"
 #include "libs/base/gpio.h"
 #include "libs/base/filesystem.h"
 #include "libs/base/ethernet.h"
-#include "libs/base/check.h"
 #include "libs/base/watchdog.h"
 #include "libs/base/reset.h"
 #include "libs/base/mutex.h"
@@ -35,8 +31,6 @@
 #include "libs/tpu/edgetpu_manager.h"
 #include "third_party/freertos_kernel/include/FreeRTOS.h"
 #include "third_party/freertos_kernel/include/task.h"
-#include "third_party/nxp/rt1176-sdk/middleware/lwip/src/include/lwip/dns.h"
-#include "third_party/nxp/rt1176-sdk/middleware/lwip/src/include/lwip/tcpip.h"
 #include "third_party/tflite-micro/tensorflow/lite/micro/micro_error_reporter.h"
 #include "third_party/tflite-micro/tensorflow/lite/micro/micro_interpreter.h"
 #include "third_party/tflite-micro/tensorflow/lite/micro/micro_mutable_op_resolver.h"
@@ -156,12 +150,12 @@ cfg_struct_t buildDefaultConfig() {
  * @param config where to store final config
  * @return true on success, false otherwise
  */
-bool configFromRaw(std::vector<uint8_t> raw_data, cfg_struct_t *config) {
+bool configFromRaw(vector<uint8_t> raw_data, cfg_struct_t *config) {
     //raw config is smaller than minimun size
     if (raw_data.size() < 10 + 4)
         return false;
     
-    int mask_size = raw_data[0] * raw_data[0];
+    size_t mask_size = raw_data[0] * raw_data[0];
 
     //reported mask size does not match the raw config size
     if (raw_data.size() != 10 + mask_size)
@@ -188,10 +182,10 @@ bool configFromRaw(std::vector<uint8_t> raw_data, cfg_struct_t *config) {
 /** @brief create raw binary data from config
  * 
  * @param config config to parse
- * @return std::vector<uint8_t> raw binary config data
+ * @return vector<uint8_t> raw binary config data
  */
-std::vector<uint8_t> configToRaw(const cfg_struct_t &config) {
-    std::vector<uint8_t> raw_data;
+vector<uint8_t> configToRaw(const cfg_struct_t &config) {
+    vector<uint8_t> raw_data;
     raw_data.push_back(config.mask_size);
     raw_data.push_back(config.mask_thresh);
     raw_data.insert(raw_data.end(), config.mask.begin(), config.mask.end());
@@ -213,7 +207,7 @@ std::vector<uint8_t> configToRaw(const cfg_struct_t &config) {
  * @param raw_cfg raw config binary data
  * @return true on success, false otherwise
  */
-bool writeConfigToFile(const char *path, const std::vector<uint8_t> &raw_cfg) {
+inline bool writeConfigToFile(const char *path, const vector<uint8_t> &raw_cfg) {
     return LfsWriteFile(path, raw_cfg.data(), raw_cfg.size());
 }
 
@@ -257,13 +251,13 @@ bool isBBoxMasked(bbox_t bbox, const image_vector_t& mask, int mask_size, int im
     for (int y = bbox.ymin; y <= bbox.ymax; y++) {
         for (int x = bbox.xmin; x <= bbox.xmax; x++) {
             // Map the image coordinates to grid coordinates.
-            int gridX = x / scale;
-            int gridY = y / scale;
+            int grid_x = x / scale;
+            int grid_y = y / scale;
 
             // Check if the current point is inside the box.
-            if (isInsideBox(gridX, gridY, bbox.xmin/scale, bbox.xmax/scale, bbox.ymin/scale, bbox.ymax/scale)) {
+            if (isInsideBox(grid_x, grid_y, bbox.xmin/scale, bbox.xmax/scale, bbox.ymin/scale, bbox.ymax/scale)) {
                 // Index in the grid
-                int index = gridY * mask_size + gridX;
+                int index = grid_y * mask_size + grid_x;
 
                 // Check if the cell is non-toggled
                 covered_cells += mask[index];
@@ -287,7 +281,7 @@ bool isBBoxMasked(bbox_t bbox, const image_vector_t& mask, int mask_size, int im
  * @param count How many pixels have to change
  * @return true if changed enough, false otherwise
  */
-bool hasBBoxChanged(const image_vector_t &current_image, const image_vector_t &previous_image, int image_size, bbox_t bbox, float change, float count) {
+bool hasBBoxChanged(const image_vector_t &current_image, const image_vector_t &previous_image, int image_size,bbox_t bbox, float change, float count) {
     int32_t changed = 0;
     int32_t pixel_cnt = (bbox.xmax - bbox.xmin + 1) * (bbox.ymax - bbox.ymin + 1);
     for (int y = bbox.ymin; y <= bbox.ymax; ++y) {
@@ -335,7 +329,7 @@ float IoU(const bbox_t& a, const bbox_t& b) {
  * 3 if something is detected, is unmasked and is detected in the last 3 out of 5 frames.
  */
 int postprocessResults(vector<bbox_t> *results, tflite::MicroInterpreter *interpreter,
-               const image_vector_t &image, const image_vector_t &background, const cfg_struct_t &config) {
+                       const image_vector_t &image, const image_vector_t &background, const cfg_struct_t &config) {
 
     static int consec_unmasked = 0; //keeps count of consecutive unmasked detections
 
@@ -362,11 +356,11 @@ int postprocessResults(vector<bbox_t> *results, tflite::MicroInterpreter *interp
 
         //create bbox
         bbox_t bbox = {
-            .xmin  = max(0.0f, round(bboxes[4 * i + 1] * gl_image_size)),
-            .ymin  = max(0.0f, round(bboxes[4 * i]     * gl_image_size)),
-            .xmax  = max(0.0f, round(bboxes[4 * i + 3] * gl_image_size)),
-            .ymax  = max(0.0f, round(bboxes[4 * i + 2] * gl_image_size)),
-            .score = round(scores[i] * 100),
+            .xmin  = static_cast<int>(max(0.0f, round(bboxes[4 * i + 1] * gl_image_size))),
+            .ymin  = static_cast<int>(max(0.0f, round(bboxes[4 * i]     * gl_image_size))),
+            .xmax  = static_cast<int>(max(0.0f, round(bboxes[4 * i + 3] * gl_image_size))),
+            .ymax  = static_cast<int>(max(0.0f, round(bboxes[4 * i + 2] * gl_image_size))),
+            .score = static_cast<int>(round(scores[i] * 100)),
             .type  = BBOX_MASKED
         };
         if (bbox.xmax >= gl_image_size)
@@ -476,7 +470,7 @@ int postprocessResults(vector<bbox_t> *results, tflite::MicroInterpreter *interp
 
 
 
-//Main detect task
+/** @brief Main detection task*/
 static void detectTask(void *args) {
     gl_status = 0;                          //set status
     cfg_struct_t config = gl_config;        //copy current config
@@ -583,7 +577,7 @@ HttpServer::Content getUriHandler(const char* uri) {
         MutexLock lock(data_mux);
 
         //create packet with status, results and image and send it
-        std::vector<uint8_t> packet;
+        vector<uint8_t> packet;
         packet.push_back(gl_status + 128);
         packet.push_back(gl_camera_time);
         packet.push_back(gl_inference_time);
@@ -673,7 +667,7 @@ string postUriHandler(string uri, vector<uint8_t> payload) {
 }
 
 
-
+/** @brief Main app entrypoint*/
 extern "C" [[noreturn]] void app_main(void* param) {
     (void)param;
 
