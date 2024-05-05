@@ -1,6 +1,5 @@
 add_executable_m7(my_project
     main.cpp
-    M4_EXECUTABLE
     DATA
     ${CMAKE_CURRENT_SOURCE_DIR}/web/page.html>/page.html
     ${CMAKE_CURRENT_SOURCE_DIR}/web/responses/ok.txt>/ok.txt
