@@ -30,7 +30,6 @@ typedef std::vector<bbox_t> bbox_vector_t;
 typedef struct{
     int mask_size;
     int mask_thresh;
-    std::vector<uint8_t> mask;
     int rotation;
     int det_thresh;
     int iou_thresh;
@@ -39,4 +38,5 @@ typedef struct{
     int min_width;
     int min_height;
     bool min_as_area;
+    std::vector<uint8_t> mask;
 } cfg_struct_t;

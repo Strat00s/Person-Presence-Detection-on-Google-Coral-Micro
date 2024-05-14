@@ -8,6 +8,7 @@
  * 
  */
 
+
 #include <cstdio>
 #include <vector>
 #include <algorithm>
@@ -113,6 +114,178 @@ TaskHandle_t detect_task_handle;
 
 
 /*----(HELPERS)----*/
+void exit();
+void reset();
+
+
+/*----(CONFIG HANDLING FUNCTIONS)----*/
+cfg_struct_t buildDefaultConfig();
+
+bool configFromRaw(vector<uint8_t> raw_data, cfg_struct_t *config);
+
+vector<uint8_t> configToRaw(const cfg_struct_t &config);
+
+bool writeConfigToFile(const char *path, const vector<uint8_t> &raw_cfg);
+
+vector<uint8_t> readConfigFromFile(const char *path);
+
+
+/*----(DETECTION TASK FUNCTIONS)----*/
+static void detectTask(void *args);
+
+int postprocessResults(vector<bbox_t> *results, tflite::MicroInterpreter *interpreter,
+                       const image_vector_t &image, const image_vector_t &background, const cfg_struct_t &config);
+
+float IoU(const bbox_t& a, const bbox_t& b);
+
+bool hasBBoxChanged(const image_vector_t &current_image, const image_vector_t &previous_image,
+                    int image_size, bbox_t bbox, float change, float count);
+
+bool isBBoxMasked(bbox_t bbox, const image_vector_t& mask, int mask_size, int image_size, float threshold);
+
+bool isInsideBox(int x, int y, int xmin, int xmax, int ymin, int ymax);
+
+
+/*----(GET & POST HANDLERS)----*/
+HttpServer::Content getUriHandler(const char* uri);
+
+string postUriHandler(string uri, vector<uint8_t> payload);
+
+
+
+/*----(MAIN ENTRYPOINT)----*/
+extern "C" [[noreturn]] void app_main(void* param) {
+    (void)param;
+
+    LedSet(Led::kStatus, true);
+    GpioSetMode(PIN0, GpioMode::kOutput);
+    GpioSetMode(PIN1, GpioMode::kOutput);
+
+
+    config_mux = xSemaphoreCreateMutex();
+    data_mux   = xSemaphoreCreateMutex();
+    sync_sem   = xSemaphoreCreateBinary();
+
+
+    auto reset_stats = ResetGetStats();
+    printf("Reset stats:\n");
+    printf("  Reason:     %ld\n", reset_stats.reset_reason);
+    printf("  wdog cnt:   %ld\n", reset_stats.watchdog_resets);
+    printf("  lockup cnt: %ld\n", reset_stats.lockup_resets);
+
+
+    WatchdogStart({
+        .timeout_s = 2,
+        .pet_rate_s = 1,
+        .enable_irq = false
+    });
+
+
+    //load config
+    auto raw_cfg = readConfigFromFile(NEW_CONFIG_PATH);
+    //empty/non-existant file or malformed csv
+    if (!raw_cfg.size() || !configFromRaw(raw_cfg, &gl_config)) {
+        gl_config = buildDefaultConfig();
+        if (!writeConfigToFile(NEW_CONFIG_PATH, configToRaw(gl_config))) {
+            printf("Failed to write config to file\n");
+            reset();
+        }
+        printf("Default config generated\n");
+    }
+    else
+        printf("Config loaded from file\n");
+
+
+    // Try and get an IP
+    printf("Attempting to use ethernet...\n");
+    bool eth_succ = EthernetInit(true);
+    if (!eth_succ) {
+        printf("Failed to init ethernet\n");
+        reset();
+    }
+    else {
+        auto ip_addr = EthernetGetIp();
+        if (ip_addr.has_value())
+            printf("DHCP succeeded, our IP is %s\n", ip_addr.value().c_str());
+        else {
+            printf("We didn't get an IP via DHCP. Continuing wihtout internet.\n");
+            eth_succ = false;
+        }
+    }
+
+
+    //Read the model and checks version.
+    vector<uint8_t> model_raw;  //entire model is stored in this vector
+    if (!LfsReadFile(MODEL_PATH, &model_raw)) {
+        printf("Failed to load model\n");
+        exit();
+    }
+
+    //confirm model version
+    auto* model = tflite::GetModel(model_raw.data());
+    if (model->version() != TFLITE_SCHEMA_VERSION) {
+        printf("Model version: %ld\nSupported version: %d\n", model->version(), TFLITE_SCHEMA_VERSION);
+        exit();
+    }
+
+    //create micro interpreter
+    resolver.AddDequantize();
+    resolver.AddDetectionPostprocess();
+    resolver.AddCustom(kCustomOp, RegisterCustomOp());
+    interpreter = new tflite::MicroInterpreter(model, resolver, tensor_arena, TENSOR_ARENA_SIZE, &error_reporter);
+    if (interpreter->AllocateTensors() != kTfLiteOk) {
+        printf("Failed to allocate tensors\n");
+        exit();
+    }
+
+    if (interpreter->inputs().size() != 1) {
+        printf("Model must have only one input tensor\n");
+        exit();
+    }
+
+    auto input_tensor = interpreter->input_tensor(0);
+    if (input_tensor->dims->data[1] != input_tensor->dims->data[2]) {
+        printf("Model input is not square\n");
+        exit();
+    }
+
+    if (interpreter->outputs().size() != 4) {
+        printf("Invalid output tensor count\n");
+        exit();
+    }
+
+    //Turn on the TPU and get it's context.
+    auto tpu_context = EdgeTpuManager::GetSingleton()->OpenDevice(PerformanceMode::kMax);
+    if (!tpu_context) {
+        printf("Failed to get TPU context\n");
+        exit();
+    }
+
+    //start camera
+    CameraTask::GetSingleton()->SetPower(false);
+    vTaskDelay(100);
+    CameraTask::GetSingleton()->SetPower(true);
+    CameraTask::GetSingleton()->Enable(CameraMode::kStreaming);
+
+    //start detection task
+    xTaskCreate(detectTask, "detect", 16000, nullptr, 4, &detect_task_handle);
+    xSemaphoreTake(sync_sem, portMAX_DELAY);
+
+    //skip http server if no internet
+    if (!eth_succ)
+        vTaskSuspend(nullptr);
+
+    //start http server
+    PostHttpServer http_server;
+    http_server.AddUriHandler(getUriHandler);
+    http_server.AddPostUriHandler(postUriHandler);
+    UseHttpServer(&http_server);
+
+    vTaskSuspend(nullptr);
+}
+
+
+/*----(HELPERS)----*/
 void exit() {
     printf("Exiting...\n");
     LedSet(Led::kStatus, false);
@@ -127,7 +300,8 @@ void reset() {
 }
 
 
-/*----(CONFIG HANDLING)----*/
+/*----(CONFIG HANDLING FUNCTIONS)----*/
+/** @brief Build default config*/
 cfg_struct_t buildDefaultConfig() {
     cfg_struct_t cfg;
     cfg.mask_size    = DEFAULT_MASK_SIZE;
@@ -152,7 +326,7 @@ cfg_struct_t buildDefaultConfig() {
  */
 bool configFromRaw(vector<uint8_t> raw_data, cfg_struct_t *config) {
     //raw config is smaller than minimun size
-    if (raw_data.size() < 10 + 4)
+    if (raw_data.size() < 14)
         return false;
     
     size_t mask_size = raw_data[0] * raw_data[0];
@@ -164,17 +338,15 @@ bool configFromRaw(vector<uint8_t> raw_data, cfg_struct_t *config) {
     //copy the data
     config->mask_size   = raw_data[0];
     config->mask_thresh = raw_data[1];
-    vector<uint8_t>::const_iterator first = raw_data.begin() + 2;
-    vector<uint8_t>::const_iterator last  = raw_data.begin() + 2 + mask_size;
-    config->mask        = vector<uint8_t>(first, last);
-    config->rotation    = raw_data[mask_size + 3];
-    config->det_thresh  = raw_data[mask_size + 4];
-    config->iou_thresh  = raw_data[mask_size + 5];
-    config->fp_change   = raw_data[mask_size + 6];
-    config->fp_count    = raw_data[mask_size + 7];
-    config->min_width   = raw_data[mask_size + 8];
-    config->min_height  = raw_data[mask_size + 9];
-    config->min_as_area = raw_data[mask_size + 10];
+    config->rotation    = raw_data[2];
+    config->det_thresh  = raw_data[3];
+    config->iou_thresh  = raw_data[4];
+    config->fp_change   = raw_data[5];
+    config->fp_count    = raw_data[6];
+    config->min_width   = raw_data[7];
+    config->min_height  = raw_data[8];
+    config->min_as_area = raw_data[9];
+    config->mask        = vector<uint8>(raw_data.begin() + 10, raw_data.begin() + 10 + mask_size);
 
     return true;
 }
@@ -188,7 +360,6 @@ vector<uint8_t> configToRaw(const cfg_struct_t &config) {
     vector<uint8_t> raw_data;
     raw_data.push_back(config.mask_size);
     raw_data.push_back(config.mask_thresh);
-    raw_data.insert(raw_data.end(), config.mask.begin(), config.mask.end());
     raw_data.push_back(config.rotation);
     raw_data.push_back(config.det_thresh);
     raw_data.push_back(config.iou_thresh);
@@ -197,6 +368,11 @@ vector<uint8_t> configToRaw(const cfg_struct_t &config) {
     raw_data.push_back(config.min_width);
     raw_data.push_back(config.min_height);
     raw_data.push_back(config.min_as_area);
+
+    //raw_data.insert(raw_data.end(), config.mask.begin(), config.mask.end());
+    for (int i = 0; i < config.mask_size * config.mask_size; i++) {
+        raw_data.push_back(config.mask[i]);
+    }
 
     return raw_data;
 }
@@ -207,10 +383,9 @@ vector<uint8_t> configToRaw(const cfg_struct_t &config) {
  * @param raw_cfg raw config binary data
  * @return true on success, false otherwise
  */
-inline bool writeConfigToFile(const char *path, const vector<uint8_t> &raw_cfg) {
+bool writeConfigToFile(const char *path, const vector<uint8_t> &raw_cfg) {
     return LfsWriteFile(path, raw_cfg.data(), raw_cfg.size());
 }
-
 
 /** @brief Read raw binary config data from file
  * 
@@ -225,91 +400,93 @@ vector<uint8_t> readConfigFromFile(const char *path) {
 }
 
 
-/*----(MASK HANDLING)----*/
-// Helper function to check if the coordinates are inside the box.
-inline bool isInsideBox(int x, int y, int xmin, int xmax, int ymin, int ymax) {
-    return (x >= xmin && x <= xmax && y >= ymin && y <= ymax);
-}
+/*----(DETECTION TASK FUNCTIONS)----*/
+/** @brief Main detection task*/
+static void detectTask(void *args) {
+    gl_status = 0;                          //set status
+    cfg_struct_t config = gl_config;        //copy current config
+    gl_image.resize(IMAGE_SIZE);            //resize image
+    image_vector_t background(IMAGE_SIZE);  //create background
 
-/** @brief Check if enough bbox is masked
- * 
- * @param bbox 
- * @param mask 
- * @param mask_size 
- * @param image_size 
- * @param threshold
- * @return true if masked, false if not
- */
-bool isBBoxMasked(bbox_t bbox, const image_vector_t& mask, int mask_size, int image_size, float threshold) {
-    // Scale factor from the image size to grid size.
-    const int scale = image_size / mask_size;
+    int bckg_upd_cnt = 0;
 
-    int covered_cells = 0;
-    int total_cells = 0;
+    //use input tensor as direct image storage
+    uint8_t *tensor_input = tflite::GetTensorData<uint8_t>(interpreter->input_tensor(0));
 
-    // Iterate over the box's range.
-    for (int y = bbox.ymin; y <= bbox.ymax; y++) {
-        for (int x = bbox.xmin; x <= bbox.xmax; x++) {
-            // Map the image coordinates to grid coordinates.
-            int grid_x = x / scale;
-            int grid_y = y / scale;
+    //create default frame
+    CameraFrameFormat frame = {
+        CameraFormat::kRgb,
+        CameraFilterMethod::kNearestNeighbor,
+        CameraRotation::k0,
+        gl_image_size,
+        gl_image_size,
+        true,
+        tensor_input,
+        true
+    };
 
-            // Check if the current point is inside the box.
-            if (isInsideBox(grid_x, grid_y, bbox.xmin/scale, bbox.xmax/scale, bbox.ymin/scale, bbox.ymax/scale)) {
-                // Index in the grid
-                int index = grid_y * mask_size + grid_x;
+    xSemaphoreGive(sync_sem);   //sync with main task
 
-                // Check if the cell is non-toggled
-                covered_cells += mask[index];
-                total_cells++;
-            }
+    TickType_t last_wake_time;
+    const TickType_t frequency = 50;
+
+    int inference_time = 0;
+
+    while (true) {
+        vTaskDelayUntil(&last_wake_time, frequency);
+
+        //update config
+        if (gl_update_config) {
+            xSemaphoreTake(config_mux, portMAX_DELAY);
+            config = gl_config;
+            gl_update_config = false;
+            frame.rotation = static_cast<coralmicro::CameraRotation>(gl_config.rotation);
+            xSemaphoreGive(config_mux);
         }
-    }
 
-    return covered_cells > total_cells * (1.0f - threshold);
-}
-
-
-/*----(DETECTION HADNLING)----*/
-/** @brief Function to check if the specified region has changed significantly - average color approach
- * 
- * @param current_image 
- * @param previous_image 
- * @param image_size 
- * @param bbox bounding vox
- * @param change How much individual pixels need to change to be counted
- * @param count How many pixels have to change
- * @return true if changed enough, false otherwise
- */
-bool hasBBoxChanged(const image_vector_t &current_image, const image_vector_t &previous_image, int image_size,bbox_t bbox, float change, float count) {
-    int32_t changed = 0;
-    int32_t pixel_cnt = (bbox.xmax - bbox.xmin + 1) * (bbox.ymax - bbox.ymin + 1);
-    for (int y = bbox.ymin; y <= bbox.ymax; ++y) {
-        for (int x = bbox.xmin; x <= bbox.xmax; ++x) {
-            size_t index = (y * image_size + x) * 3;
-            int pixel_change = abs(current_image[index] - previous_image[index]) +
-                               abs(current_image[index + 1] - previous_image[index + 1]) +
-                               abs(current_image[index + 2] - previous_image[index + 2]);
-            if (pixel_change > 0xFF * 3 * change)
-                changed++;
+        //get last image from camera
+        int ticks = xTaskGetTickCount();
+        int ret = CameraTask::GetSingleton()->GetFrame({frame});
+        if (!ret) {
+            printf("Failed to get image from camera.\n");
+            gl_status = -1;
+            xSemaphoreGive(sync_sem);
+            reset();
         }
+        gl_camera_time = xTaskGetTickCount() - ticks;
+
+        //run model
+        int inference_ticks = xTaskGetTickCount();
+        if (interpreter->Invoke() != kTfLiteOk) {
+            printf("Invoke failed\n");
+            gl_status = -2;
+            xSemaphoreGive(sync_sem);
+            reset();
+        }
+        gl_inference_time = xTaskGetTickCount() - inference_ticks;
+
+        //get results from inference and update global variables
+        xSemaphoreTake(data_mux, portMAX_DELAY);
+        int extract_time = xTaskGetTickCount();
+        gl_image = image_vector_t(tensor_input, tensor_input + IMAGE_SIZE);
+        gl_status = postprocessResults(&gl_bboxes, interpreter, gl_image, background, config);
+        gl_postprocess_time = xTaskGetTickCount() - extract_time;
+        xSemaphoreGive(data_mux);
+        xSemaphoreGive(sync_sem);   //sync with web task (if it is waiting for us)
+
+        //toggle led and pins
+        LedSet(Led::kUser, gl_status > 2);
+        GpioSet(PIN0, gl_status < 3 && gl_status > 0);
+        GpioSet(PIN1, gl_status > 2);
+
+        //update background
+        bckg_upd_cnt = gl_status ? 0 : bckg_upd_cnt + 1;
+        if (bckg_upd_cnt >= 10)
+            background = gl_image;
+
+        inference_time = (inference_time + xTaskGetTickCount() - ticks) / 2;
+        printf("Average detection time: %03d ms | Status: %d\n", inference_time, gl_status);
     }
-
-    return changed > round(pixel_cnt * count);
-}
-
-/** @brief Intersection over union calculations for overlaping bounding boxes
- * 
- * @param a First bounding box
- * @param b Second boundig box
- * @return overlap ratio
- */
-float IoU(const bbox_t& a, const bbox_t& b) {
-    float int_area = max(0, min(a.xmax, b.xmax) - max(a.xmin, b.xmin)) *
-                     max(0, min(a.ymax, b.ymax) - max(a.ymin, b.ymin));
-    float un_area = (a.xmax - a.xmin) * (a.ymax - a.ymin) +
-                    (b.xmax - b.xmin) * (b.ymax - b.ymin) - int_area;
-    return int_area / un_area;
 }
 
 /** @brief Get results from inference.
@@ -384,8 +561,6 @@ int postprocessResults(vector<bbox_t> *results, tflite::MicroInterpreter *interp
 
         tmp_results.push_back(bbox);
     }
-
-    printf("Prelimenary results: %d\n", tmp_results.size());
 
     //nothing valid detected
     if (!tmp_results.size()) {
@@ -468,99 +643,97 @@ int postprocessResults(vector<bbox_t> *results, tflite::MicroInterpreter *interp
     return ret;
 }
 
+/** @brief Intersection over union calculations for overlaping bounding boxes
+ * 
+ * @param a first bounding box
+ * @param b second boundig box
+ * @return overlap ratio
+ */
+float IoU(const bbox_t& a, const bbox_t& b) {
+    float int_area = max(0, min(a.xmax, b.xmax) - max(a.xmin, b.xmin)) *
+                     max(0, min(a.ymax, b.ymax) - max(a.ymin, b.ymin));
+    float un_area = (a.xmax - a.xmin) * (a.ymax - a.ymin) +
+                    (b.xmax - b.xmin) * (b.ymax - b.ymin) - int_area;
+    return int_area / un_area;
+}
 
+/** @brief Function to check if the specified region has changed significantly - average color approach
+ * 
+ * @param current_image 
+ * @param previous_image 
+ * @param image_size image dimensions
+ * @param bbox bounding box
+ * @param change how much individual pixels need to change to be counted
+ * @param count how many pixels have to change
+ * @return true if changed enough, false otherwise
+ */
+bool hasBBoxChanged(const image_vector_t &current_image, const image_vector_t &previous_image,
+                    int image_size,bbox_t bbox, float change, float count) {
 
-/** @brief Main detection task*/
-static void detectTask(void *args) {
-    gl_status = 0;                          //set status
-    cfg_struct_t config = gl_config;        //copy current config
-    gl_image.resize(IMAGE_SIZE);            //resize image
-    image_vector_t background(IMAGE_SIZE);  //create background
+    if (!static_cast<int>(count))
+        return true;
 
-    int bckg_upd_cnt = 0;
-
-    uint8_t *tensor_input = tflite::GetTensorData<uint8_t>(interpreter->input_tensor(0));
-
-    //create default frame
-    CameraFrameFormat frame = {
-        CameraFormat::kRgb,
-        CameraFilterMethod::kNearestNeighbor,
-        CameraRotation::k0,
-        gl_image_size,
-        gl_image_size,
-        true,
-        tensor_input,
-        true
-    };
-
-    xSemaphoreGive(sync_sem);   //sync with main task
-
-    TickType_t last_wake_time;
-    const TickType_t frequency = 50;
-
-    int inference_time = 0;
-
-    while (true) {
-        vTaskDelayUntil(&last_wake_time, frequency);
-
-        //update config
-        if (gl_update_config) {
-            xSemaphoreTake(config_mux, portMAX_DELAY);
-            config = gl_config;
-            gl_update_config = false;
-            frame.rotation = static_cast<coralmicro::CameraRotation>(gl_config.rotation);
-            xSemaphoreGive(config_mux);
+    int32_t changed = 0;
+    int32_t pixel_cnt = (bbox.xmax - bbox.xmin + 1) * (bbox.ymax - bbox.ymin + 1);
+    for (int y = bbox.ymin; y <= bbox.ymax; ++y) {
+        for (int x = bbox.xmin; x <= bbox.xmax; ++x) {
+            size_t index = (y * image_size + x) * 3;
+            int pixel_change = abs(current_image[index] - previous_image[index]) +
+                               abs(current_image[index + 1] - previous_image[index + 1]) +
+                               abs(current_image[index + 2] - previous_image[index + 2]);
+            if (pixel_change > 0xFF * 3 * change)
+                changed++;
         }
-
-        //get last image from camera
-        int ticks = xTaskGetTickCount();
-        int ret = CameraTask::GetSingleton()->GetFrame({frame});
-        if (!ret) {
-            printf("Failed to get image from camera.\r\n");
-            gl_status = -1;
-            xSemaphoreGive(sync_sem);
-            reset();
-        }
-        gl_camera_time = xTaskGetTickCount() - ticks;
-
-        //run model
-        int inference_ticks = xTaskGetTickCount();
-        if (interpreter->Invoke() != kTfLiteOk) {
-            printf("Invoke failed\n");
-            gl_status = -2;
-            xSemaphoreGive(sync_sem);
-            reset();
-        }
-        gl_inference_time = xTaskGetTickCount() - inference_ticks;
-
-        //get results from inference and update global variables
-        xSemaphoreTake(data_mux, portMAX_DELAY);
-        int extract_time = xTaskGetTickCount();
-        gl_image = image_vector_t(tensor_input, tensor_input + IMAGE_SIZE);
-        gl_status = postprocessResults(&gl_bboxes, interpreter, gl_image, background, config);
-        gl_postprocess_time = xTaskGetTickCount() - extract_time;
-        xSemaphoreGive(data_mux);
-        xSemaphoreGive(sync_sem);   //sync with web task (if it is waiting for us)
-
-        //toggle led and pins
-        LedSet(Led::kUser, gl_status > 2);
-        GpioSet(PIN0, gl_status < 3 && gl_status > 0);
-        GpioSet(PIN1, gl_status > 2);
-
-        //update background
-        bckg_upd_cnt = gl_status ? 0 : bckg_upd_cnt + 1;
-        if (bckg_upd_cnt >= 10) {
-            background = gl_image;
-            printf("Background updated\n");
-        }
-
-        inference_time = (inference_time + xTaskGetTickCount() - ticks) / 2;
-        printf("Average detect time: %d\n", inference_time);
     }
+
+    return changed >= round(pixel_cnt * count);
+}
+
+/** @brief Check if enough bbox is masked
+ * 
+ * @param bbox bounding box
+ * @param mask mask
+ * @param mask_size mask dimensions
+ * @param image_size image dimensions
+ * @param threshold mask threshold
+ * @return true if masked, false if not
+ */
+bool isBBoxMasked(bbox_t bbox, const image_vector_t& mask, int mask_size, int image_size, float threshold) {
+    // Scale factor from the image size to grid size.
+    const int scale = image_size / mask_size;
+
+    int covered_cells = 0;
+    int total_cells = 0;
+
+    // Iterate over the box's range.
+    for (int y = bbox.ymin; y <= bbox.ymax; y++) {
+        for (int x = bbox.xmin; x <= bbox.xmax; x++) {
+            // Map the image coordinates to grid coordinates.
+            int grid_x = x / scale;
+            int grid_y = y / scale;
+
+            // Check if the current point is inside the box.
+            if (isInsideBox(grid_x, grid_y, bbox.xmin/scale, bbox.xmax/scale, bbox.ymin/scale, bbox.ymax/scale)) {
+                // Index in the grid
+                int index = grid_y * mask_size + grid_x;
+
+                // Check if the cell is non-toggled
+                covered_cells += mask[index];
+                total_cells++;
+            }
+        }
+    }
+
+    return covered_cells > total_cells * (1.0f - threshold);
+}
+
+/** @brief Helper function to check if the coordinates are inside the box.*/
+bool isInsideBox(int x, int y, int xmin, int xmax, int ymin, int ymax) {
+    return (x >= xmin && x <= xmax && y >= ymin && y <= ymax);
 }
 
 
-/*----(REQUEST HANDLERS)----*/
+/*----(GET & POST HANDLERS)----*/
 /** @brief GET request handler
  * 
  * @param uri URI of the GET request
@@ -664,136 +837,4 @@ string postUriHandler(string uri, vector<uint8_t> payload) {
     }
 
     return {};
-}
-
-
-/** @brief Main app entrypoint*/
-extern "C" [[noreturn]] void app_main(void* param) {
-    (void)param;
-
-    LedSet(Led::kStatus, true);
-    GpioSetMode(PIN0, GpioMode::kOutput);
-    GpioSetMode(PIN1, GpioMode::kOutput);
-
-
-    config_mux = xSemaphoreCreateMutex();
-    data_mux   = xSemaphoreCreateMutex();
-    sync_sem   = xSemaphoreCreateBinary();
-
-
-    auto reset_stats = ResetGetStats();
-    printf("Reset stats:\n");
-    printf("  Reason:     %ld\n", reset_stats.reset_reason);
-    printf("  wdog cnt:   %ld\n", reset_stats.watchdog_resets);
-    printf("  lockup cnt: %ld\n", reset_stats.lockup_resets);
-
-
-    WatchdogStart({
-        .timeout_s = 2,
-        .pet_rate_s = 1,
-        .enable_irq = false
-    });
-
-
-    //load config
-    auto raw_cfg = readConfigFromFile(NEW_CONFIG_PATH);
-    //empty/non-existant file or malformed csv
-    if (!raw_cfg.size() || !configFromRaw(raw_cfg, &gl_config)) {
-        gl_config = buildDefaultConfig();
-        if (!writeConfigToFile(NEW_CONFIG_PATH, configToRaw(gl_config))) {
-            printf("Failed to write config to file\n");
-            reset();
-        }
-        printf("Default config generated\n");
-    }
-    else
-        printf("Config loaded from file\n");
-
-
-    // Try and get an IP
-    printf("Attempting to use ethernet...\r\n");
-    bool eth_succ = EthernetInit(true);
-    if (!eth_succ) {
-        printf("Failed to init ethernet\n");
-        reset();
-    }
-    else {
-        auto ip_addr = EthernetGetIp();
-        if (ip_addr.has_value())
-            printf("DHCP succeeded, our IP is %s\n", ip_addr.value().c_str());
-        else {
-            printf("We didn't get an IP via DHCP. Continuing wihtout internet.\r\n");
-            eth_succ = false;
-        }
-    }
-
-
-    //Read the model and checks version.
-    vector<uint8_t> model_raw;  //entire model is stored in this vector
-    if (!LfsReadFile(MODEL_PATH, &model_raw)) {
-        printf("Failed to load model\n");
-        exit();
-    }
-
-    //confirm model version
-    auto* model = tflite::GetModel(model_raw.data());
-    if (model->version() != TFLITE_SCHEMA_VERSION) {
-        printf("Model version: %ld\nSupported version: %d\n", model->version(), TFLITE_SCHEMA_VERSION);
-        exit();
-    }
-
-    //create micro interpreter
-    resolver.AddDequantize();
-    resolver.AddDetectionPostprocess();
-    resolver.AddCustom(kCustomOp, RegisterCustomOp());
-    interpreter = new tflite::MicroInterpreter(model, resolver, tensor_arena, TENSOR_ARENA_SIZE, &error_reporter);
-    if (interpreter->AllocateTensors() != kTfLiteOk) {
-        printf("Failed to allocate tensors\n");
-        exit();
-    }
-
-    if (interpreter->inputs().size() != 1) {
-        printf("Model must have only one input tensor\n");
-        exit();
-    }
-
-    auto input_tensor = interpreter->input_tensor(0);
-    if (input_tensor->dims->data[1] != input_tensor->dims->data[2]) {
-        printf("Model input is not square\n");
-        exit();
-    }
-
-    if (interpreter->outputs().size() != 4) {
-        printf("Invalid output tensor count\n");
-        exit();
-    }
-
-    //Turn on the TPU and get it's context.
-    auto tpu_context = EdgeTpuManager::GetSingleton()->OpenDevice(PerformanceMode::kMax);
-    if (!tpu_context) {
-        printf("Failed to get TPU context\n");
-        exit();
-    }
-
-    //start camera
-    CameraTask::GetSingleton()->SetPower(false);
-    vTaskDelay(100);
-    CameraTask::GetSingleton()->SetPower(true);
-    CameraTask::GetSingleton()->Enable(CameraMode::kStreaming);
-
-    //start detection task
-    xTaskCreate(detectTask, "detect", 16000, nullptr, 4, &detect_task_handle);
-    xSemaphoreTake(sync_sem, portMAX_DELAY);
-
-    //skip http server if no internet
-    if (!eth_succ)
-        vTaskSuspend(nullptr);
-
-    //start http server
-    PostHttpServer http_server;
-    http_server.AddUriHandler(getUriHandler);
-    http_server.AddPostUriHandler(postUriHandler);
-    UseHttpServer(&http_server);
-
-    vTaskSuspend(nullptr);
 }

@@ -332,25 +332,23 @@
         throw Error("Invalid config length: mask size missmatch")
 
       maskThresh = rawCfg[1];
-      
+      rotation   = rawCfg[2] * 90;
+      detThresh  = rawCfg[3];
+      iouThresh  = rawCfg[4];
+      fpChange   = rawCfg[5];
+      fpCount    = rawCfg[6];
+      minWidth   = rawCfg[7];
+      minHeight  = rawCfg[8];
+      minAsArea  = rawCfg[9] ? true : false;
+
       createMask();
       for (var i = 0; i < maskSize; i++) {
         for (var ii = 0; ii < maskSize; ii++) {
-          mask.val[i][ii] = rawCfg[2 + i * maskSize + ii];
+          mask.val[i][ii] = rawCfg[10 + i * maskSize + ii];
           toggleDir = mask.val[i][ii];
           toggleCell(i, ii);
         }
       }
-
-      let totalMaskSize = maskSize * maskSize;
-      rotation  = rawCfg[totalMaskSize + 2] * 90;
-      detThresh = rawCfg[totalMaskSize + 3];
-      iouThresh = rawCfg[totalMaskSize + 4];
-      fpChange  = rawCfg[totalMaskSize + 5];
-      fpCount   = rawCfg[totalMaskSize + 6];
-      minWidth  = rawCfg[totalMaskSize + 7];
-      minHeight = rawCfg[totalMaskSize + 8];
-      minAsArea = rawCfg[totalMaskSize + 10] ? true : false;
 
       updateElements()
     }
@@ -362,27 +360,27 @@
 
       previewSize = Number(cfgArray[0]);
       maskSize    = Number(cfgArray[1]);
-      if (cfgArray[2].length != maskSize * maskSize)
+      maskThresh  = Number(cfgArray[2]);
+      rotation    = Number(cfgArray[3]);
+      detThresh   = Number(cfgArray[4]);
+      iouThresh   = Number(cfgArray[5]);
+      fpChange    = Number(cfgArray[6]);
+      fpCount     = Number(cfgArray[7]);
+      minWidth    = Number(cfgArray[8]);
+      minHeight   = Number(cfgArray[9]);
+      minAsArea   = cfgArray[10] == "1";
+
+      if (cfgArray[11].length != maskSize * maskSize)
         throw Error("Invalid config length: mask size missmatch")
 
       createMask();
       for (var i = 0; i < maskSize; i++) {
         for (var ii = 0; ii < maskSize; ii++) {
-          mask.val[i][ii] = cfgArray[2][i * maskSize + ii] == "1" ? 1 : 0;
+          mask.val[i][ii] = cfgArray[11][i * maskSize + ii] == "1" ? 1 : 0;
           toggleDir = mask.val[i][ii];
           toggleCell(i, ii);
         }
       }
-
-      maskThresh  = Number(cfgArray[3]);
-      rotation    = Number(cfgArray[4]);
-      detThresh   = Number(cfgArray[5]);
-      iouThresh   = Number(cfgArray[6]);
-      fpChange    = Number(cfgArray[7]);
-      fpCount     = Number(cfgArray[8]);
-      minWidth    = Number(cfgArray[9]);
-      minHeight   = Number(cfgArray[10]);
-      minAsArea   = cfgArray[11] == "1";
 
       updateElements();
       resizePreview();
@@ -416,19 +414,19 @@
       let rawCfg = new Uint8Array(10 + totalMaskSize);
       rawCfg[0] = maskSize;
       rawCfg[1] = maskThresh;
+      rawCfg[2] = rotation / 90;
+      rawCfg[3] = detThresh;
+      rawCfg[4] = iouThresh;
+      rawCfg[5] = fpChange;
+      rawCfg[6] = fpCount;
+      rawCfg[7] = minWidth;
+      rawCfg[8] = minHeight;
+      rawCfg[9] = minAsArea ? 1 : 0;
       for (var i = 0; i < maskSize; i++) {
         for (var ii = 0; ii < maskSize; ii++) {
-          rawCfg[2 + i * maskSize + ii] = mask.val[i][ii];
+          rawCfg[10 + i * maskSize + ii] = mask.val[i][ii];
         }
       }
-      rawCfg[totalMaskSize + 3] = rotation / 90;
-      rawCfg[totalMaskSize + 4] = detThresh;
-      rawCfg[totalMaskSize + 5] = iouThresh;
-      rawCfg[totalMaskSize + 6] = fpChange;
-      rawCfg[totalMaskSize + 7] = fpCount;
-      rawCfg[totalMaskSize + 8] = minWidth;
-      rawCfg[totalMaskSize + 9] = minHeight;
-      rawCfg[totalMaskSize + 10] = minAsArea ? 1 : 0;
 
       console.log(rawCfg.byteLength);
 
@@ -451,14 +449,8 @@
     //Build csv from local configuration
     function csvFromConfig() {
       let maskVal = "";
-      mask.val.forEach(row => {
-        row.forEach(item => {
-          maskVal += item.toString();
-        })
-      })
       var csv = previewSize.toString() + ",";
       csv += maskSize.toString()    + ",";
-      csv += maskVal + ",";
       csv += maskThresh.toString()  + ",";
       csv += rotation.toString()    + ",";
       csv += detThresh.toString()   + ",";
@@ -467,7 +459,12 @@
       csv += fpCount.toString()     + ",";
       csv += minWidth.toString()    + ",";
       csv += minHeight.toString()   + ",";
-      csv += minAsArea ? "1" : "0";
+      csv += minAsArea ? "1," : "0,";
+      mask.val.forEach(row => {
+        row.forEach(item => {
+          csv += item.toString();
+        })
+      })
       return csv;
     }
 
@@ -514,23 +511,21 @@
       else
         mask.elem[i][j].classList.remove("toggled");
 
+      console.log(toggleDir);
       mask.val[i][j] = toggleDir;
     }
 
     //un/hide the mask
     function toggleMask() {
       var mask = document.getElementById("gridCanvas");
-      if (mask.style.display == "none")
-        mask.style.display = "block"; //The mask was hidden, now show it
-      else
-        mask.style.display = "none"; //The mask is visible, now hide it
+      mask.style.display = mask.style.display == "none" ? "block" : "none";
     }
 
     function resetMask() {
       toggleDir = 0;
       for (let i = 0; i < maskSize; i++) {
-        for (let j = 0; j < maskSize; j++) {
-          toggleCell(i, j);
+        for (let ii = 0; ii < maskSize; ii++) {
+          toggleCell(i, ii);
         }
       }
     }
@@ -560,7 +555,7 @@
 
       //create the cells
       for (let i = 0; i < maskSize; i++) {
-        for (let j = 0; j < maskSize; j++) {
+        for (let ii = 0; ii < maskSize; ii++) {
           const cell = document.createElement("div");
           cell.className = "cell";
           cell.dataset.toggled = false; //Custom attribute to track state
@@ -569,14 +564,14 @@
 
           cell.addEventListener("mousedown", function (event) {
             mouseIsDown = true;
-            toggleDir = mask.val[i][j] ? 0 : 1;
-            toggleCell(i, j);
+            toggleDir = mask.val[i][ii] ? 0 : 1;
+            toggleCell(i, ii);
             event.preventDefault(); //Prevent text selection
           });
 
           cell.addEventListener("mouseenter", function () {
             if (mouseIsDown)
-              toggleCell(i, j);
+              toggleCell(i, ii);
           });
 
           cell.addEventListener("mouseup", function () {
@@ -584,7 +579,7 @@
           });
 
           gridCanvas.appendChild(cell);
-          mask.elem[i][j] = cell;
+          mask.elem[i][ii] = cell;
         }
       }
     }
@@ -642,14 +637,14 @@
           //get the image
           let imageStart = 5 + bboxCnt * 10 + 2;
           let imageSize = dataView.getUint16(imageStart - 2);
-          const rawImageData = arrayBuffer.slice(imageStart);      //Slice jpeg from the data
+          const rawImageData = arrayBuffer.slice(imageStart);
           let imageDataArray = new Uint8ClampedArray(imageSize * imageSize * 4);
-          // Convert the RGB values to RGBA by adding an alpha value of 255 (fully opaque)
-          for (let i = 0, j = 0; i < imageSize * imageSize * 3; i += 3, j += 4) {
-            imageDataArray[j] = new Uint8Array(rawImageData)[i];     // Red
-            imageDataArray[j + 1] = new Uint8Array(rawImageData)[i + 1]; // Green
-            imageDataArray[j + 2] = new Uint8Array(rawImageData)[i + 2]; // Blue
-            imageDataArray[j + 3] = 255; // Alpha (fully opaque)
+          //rgb -> rgba
+          for (let i = 0, ii = 0; i < imageSize * imageSize * 3; i += 3, ii += 4) {
+            imageDataArray[ii] = new Uint8Array(rawImageData)[i];         // red
+            imageDataArray[ii + 1] = new Uint8Array(rawImageData)[i + 1]; // green
+            imageDataArray[ii + 2] = new Uint8Array(rawImageData)[i + 2]; // blue
+            imageDataArray[ii + 3] = 255;                                 // alpha
           }
 
           //create a canvas for drawing bboxes on the image
