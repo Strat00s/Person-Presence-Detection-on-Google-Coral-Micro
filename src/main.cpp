@@ -21,7 +21,6 @@
 #include "libs/base/led.h"
 #include "libs/base/strings.h"
 #include "libs/base/gpio.h"
-#include "libs/base/filesystem.h"
 #include "libs/base/ethernet.h"
 #include "libs/base/watchdog.h"
 #include "libs/base/reset.h"
@@ -37,7 +36,7 @@
 #include "third_party/tflite-micro/tensorflow/lite/micro/micro_mutable_op_resolver.h"
 
 #include "post_http_server.hpp"
-#include "structs.hpp"
+#include "ConfigManager.hpp"
 
 
 using namespace coralmicro;
@@ -61,7 +60,7 @@ using namespace std;
 
 /*----(LOCAL FILES)----*/
 #define MODEL_PATH  "/model.tflite"
-#define NEW_CONFIG_PATH "/cfg.bin"
+#define CONFIG_PATH "/cfg.bin"
 
 #define PIN0 kSpiCs
 #define PIN1 kSpiSck
@@ -89,10 +88,30 @@ using namespace std;
 STATIC_TENSOR_ARENA_IN_SDRAM(tensor_arena, TENSOR_ARENA_SIZE); //OCRAM is too small for this
 
 
+/*----(STRUCTS)----*/
+typedef std::vector<uint8_t> image_vector_t;
+
+typedef struct {
+    int xmin;
+    int ymin;
+    int xmax;
+    int ymax;
+    int score;
+    int type;
+} bbox_t;
+typedef std::vector<bbox_t> bbox_vector_t;
+
+
 /*----(TFLITE MICRO)----*/
 tflite::MicroMutableOpResolver<3> resolver;
 tflite::MicroInterpreter *interpreter;
 tflite::MicroErrorReporter error_reporter;
+
+/*----(FREERTOS)----*/
+SemaphoreHandle_t config_mux;
+SemaphoreHandle_t data_mux;
+SemaphoreHandle_t sync_sem;
+TaskHandle_t detect_task_handle;
 
 /*----(SHARED GLOBAL VARIABLES)----*/
 int gl_status          = 0;
@@ -101,15 +120,11 @@ int gl_inference_time  = 0;
 int gl_camera_time     = 0;
 int gl_postprocess_time = 0;
 bool gl_update_config  = true;
-cfg_struct_t gl_config;
+//cfg_struct_t gl_config;
 image_vector_t gl_image;
 bbox_vector_t gl_bboxes;
 
-/*----(FREERTOS)----*/
-SemaphoreHandle_t config_mux;
-SemaphoreHandle_t data_mux;
-SemaphoreHandle_t sync_sem;
-TaskHandle_t detect_task_handle;
+ConfigManager cfg_manager(&config_mux);
 
 
 
@@ -182,19 +197,23 @@ extern "C" [[noreturn]] void app_main(void* param) {
 
 
     //load config
-    auto raw_cfg = readConfigFromFile(NEW_CONFIG_PATH);
-    //empty/non-existant file or malformed csv
-    if (!raw_cfg.size() || !configFromRaw(raw_cfg, &gl_config)) {
-        gl_config = buildDefaultConfig();
-        if (!writeConfigToFile(NEW_CONFIG_PATH, configToRaw(gl_config))) {
-            printf("Failed to write config to file\n");
+    int ret = cfg_manager.load(CONFIG_PATH);
+    switch (ret) {
+    case 2:
+        printf("Stored config is invalid\n");
+    case 1:
+        cfg_manager.init();
+        if (cfg_manager.save(CONFIG_PATH))
+            printf("Default config saved\n");
+        else {
+            printf("Failed to save default config\n");
             reset();
         }
-        printf("Default config generated\n");
-    }
-    else
+        break;
+    default:
         printf("Config loaded from file\n");
-
+        break;
+    }
 
     // Try and get an IP
     printf("Attempting to use ethernet...\n");
@@ -300,111 +319,11 @@ void reset() {
 }
 
 
-/*----(CONFIG HANDLING FUNCTIONS)----*/
-/** @brief Build default config*/
-cfg_struct_t buildDefaultConfig() {
-    cfg_struct_t cfg;
-    cfg.mask_size    = DEFAULT_MASK_SIZE;
-    cfg.mask_thresh  = DEFAULT_MASK_THRESH;
-    cfg.rotation     = DEFAULT_ROTATION;
-    cfg.det_thresh   = DEFAULT_DET_THRESH;
-    cfg.iou_thresh   = DEFAULT_IOU_THRESH;
-    cfg.fp_change    = DEFAULT_FP_CHANGE;
-    cfg.fp_count     = DEFAULT_FP_COUNT;
-    cfg.min_width    = DEFAULT_MIN_WIDTH;
-    cfg.min_height   = DEFAULT_MIN_HEIGHT;
-    cfg.min_as_area  = DEFAULT_MIN_AS_AREA;
-    cfg.mask.resize(cfg.mask_size * cfg.mask_size, 0);
-    return cfg;
-}
-
-/** @brief Parse raw binary data as config
- * 
- * @param raw_data raw config binary
- * @param config where to store final config
- * @return true on success, false otherwise
- */
-bool configFromRaw(vector<uint8_t> raw_data, cfg_struct_t *config) {
-    //raw config is smaller than minimun size
-    if (raw_data.size() < 14)
-        return false;
-    
-    size_t mask_size = raw_data[0] * raw_data[0];
-
-    //reported mask size does not match the raw config size
-    if (raw_data.size() != 10 + mask_size)
-        return false;
-
-    //copy the data
-    config->mask_size   = raw_data[0];
-    config->mask_thresh = raw_data[1];
-    config->rotation    = raw_data[2];
-    config->det_thresh  = raw_data[3];
-    config->iou_thresh  = raw_data[4];
-    config->fp_change   = raw_data[5];
-    config->fp_count    = raw_data[6];
-    config->min_width   = raw_data[7];
-    config->min_height  = raw_data[8];
-    config->min_as_area = raw_data[9];
-    config->mask        = vector<uint8>(raw_data.begin() + 10, raw_data.begin() + 10 + mask_size);
-
-    return true;
-}
-
-/** @brief create raw binary data from config
- * 
- * @param config config to parse
- * @return vector<uint8_t> raw binary config data
- */
-vector<uint8_t> configToRaw(const cfg_struct_t &config) {
-    vector<uint8_t> raw_data;
-    raw_data.push_back(config.mask_size);
-    raw_data.push_back(config.mask_thresh);
-    raw_data.push_back(config.rotation);
-    raw_data.push_back(config.det_thresh);
-    raw_data.push_back(config.iou_thresh);
-    raw_data.push_back(config.fp_change);
-    raw_data.push_back(config.fp_count);
-    raw_data.push_back(config.min_width);
-    raw_data.push_back(config.min_height);
-    raw_data.push_back(config.min_as_area);
-
-    //raw_data.insert(raw_data.end(), config.mask.begin(), config.mask.end());
-    for (int i = 0; i < config.mask_size * config.mask_size; i++) {
-        raw_data.push_back(config.mask[i]);
-    }
-
-    return raw_data;
-}
-
-/** @brief Write config to file
- * 
- * @param path file path
- * @param raw_cfg raw config binary data
- * @return true on success, false otherwise
- */
-bool writeConfigToFile(const char *path, const vector<uint8_t> &raw_cfg) {
-    return LfsWriteFile(path, raw_cfg.data(), raw_cfg.size());
-}
-
-/** @brief Read raw binary config data from file
- * 
- * @param path file path
- * @return vector<uint8_t> - raw binary config data on success. Empty vector on failure.
- */
-vector<uint8_t> readConfigFromFile(const char *path) {
-    vector<uint8_t> raw_data;
-    if (!LfsReadFile(path, &raw_data))
-        return {};
-    return raw_data;
-}
-
-
 /*----(DETECTION TASK FUNCTIONS)----*/
 /** @brief Main detection task*/
 static void detectTask(void *args) {
     gl_status = 0;                          //set status
-    cfg_struct_t config = gl_config;        //copy current config
+    cfg_struct_t config = *cfg_manager.getConfig();        //copy current config
     gl_image.resize(IMAGE_SIZE);            //resize image
     image_vector_t background(IMAGE_SIZE);  //create background
 
@@ -438,10 +357,10 @@ static void detectTask(void *args) {
         //update config
         if (gl_update_config) {
             xSemaphoreTake(config_mux, portMAX_DELAY);
-            config = gl_config;
+            config = *cfg_manager.getConfig();
             gl_update_config = false;
-            frame.rotation = static_cast<coralmicro::CameraRotation>(gl_config.rotation);
             xSemaphoreGive(config_mux);
+            frame.rotation = static_cast<coralmicro::CameraRotation>(config.rotation);
         }
 
         //get last image from camera
@@ -784,22 +703,17 @@ HttpServer::Content getUriHandler(const char* uri) {
 
     //load config from device
     else if (StrEndsWith(uri, CONFIG_LOAD_WEB_PATH)) {
-        MutexLock lock(config_mux);
-        return configToRaw(gl_config);
+        return cfg_manager.toBinary();
     }
 
     //reset config
     else if (StrEndsWith(uri, CONFIG_RESET_WEB_PATH)) {
-        xSemaphoreTake(config_mux, portMAX_DELAY);
-        gl_config = buildDefaultConfig();
+        cfg_manager.init();
         gl_update_config = true;
-        auto raw_cfg = configToRaw(gl_config);
-        xSemaphoreGive(config_mux);
-
-        if (!writeConfigToFile(NEW_CONFIG_PATH, raw_cfg))
-            printf("Failed to write reset config to file\n");
-
-        return raw_cfg;
+        if (!cfg_manager.save(CONFIG_PATH))
+            printf("Failed to save config to file\n");
+        
+        return cfg_manager.toBinary();
     }
 
     //POST OK
@@ -818,23 +732,16 @@ HttpServer::Content getUriHandler(const char* uri) {
  */
 string postUriHandler(string uri, vector<uint8_t> payload) {
     //only config save is handled
-    if (StrEndsWith(uri, CONFIG_SAVE_WEB_PATH)) {
-        xSemaphoreTake(config_mux, portMAX_DELAY);
-        if (!configFromRaw(payload, &gl_config)) {
-            printf("Invalid config data provided\n");
-            xSemaphoreGive(config_mux);
-            return {};
-        }
-        gl_update_config = true;
-        xSemaphoreGive(config_mux);
+    if (!StrEndsWith(uri, CONFIG_SAVE_WEB_PATH))
+        return {};
 
-        if (!writeConfigToFile(NEW_CONFIG_PATH, payload)) {
-            printf("Failed to write config to file\n");
-            return {};
-        }
+    if (!cfg_manager.fromBinary(payload))
+        return {};
 
+    gl_update_config = true;
+
+    if (cfg_manager.save(CONFIG_PATH))
         return OK_WEB_PATH;
-    }
 
     return {};
 }
