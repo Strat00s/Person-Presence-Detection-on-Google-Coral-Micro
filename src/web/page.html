@@ -215,7 +215,7 @@
       <br>
       
       <label for="status-field">Status:</label>
-      <input type="number" id="status-field" name="status-field" style="width: 4ch" disabled>
+      <input type="text" id="status-field" name="status-field" style="width: 20ch" disabled>
     </div>
 
   </div>
@@ -618,7 +618,18 @@
           let dataView = new DataView(arrayBuffer);
 
           //get results and status
-          let status          = uint8Array[0] - 128;
+          let status = uint8Array[0] - 128;
+          let statusStr = "(" + status.toString() + ") ";
+          switch (uint8Array[0] - 128) {
+            case 0:  statusStr += "No detection";                       break;
+            case 1:  statusStr += "Detection too small";                break;
+            case 2:  statusStr += "Detection is masked";                break;
+            case 3:  statusStr += "Detection is stale";                 break;
+            case 4:  statusStr += "Person detected";                    break;
+            case -1: statusStr += "Camera failure, restarting";         break;
+            case -2: statusStr += "Invoke failure, restarting";         break;
+            default: statusStr += "Unkown status "; break;
+          }
           let cameraTime      = uint8Array[1];
           let inferenceTime   = uint8Array[2];
           let postprocessTime = uint8Array[3];
@@ -689,7 +700,7 @@
 
           }, 'image/jpeg');
 
-          document.getElementById("status-field").value = status;
+          document.getElementById("status-field").value = statusStr;
           document.getElementById("camera-time-field").value = cameraTime;
           document.getElementById("inference-time-field").value = inferenceTime;
           document.getElementById("postprocess-time-field").value = postprocessTime;
