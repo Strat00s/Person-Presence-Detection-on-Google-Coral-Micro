@@ -108,7 +108,6 @@ tflite::MicroInterpreter *interpreter;
 tflite::MicroErrorReporter error_reporter;
 
 /*----(FREERTOS)----*/
-SemaphoreHandle_t config_mux;
 SemaphoreHandle_t data_mux;
 SemaphoreHandle_t sync_sem;
 TaskHandle_t detect_task_handle;
@@ -124,13 +123,19 @@ bool gl_update_config  = true;
 image_vector_t gl_image;
 bbox_vector_t gl_bboxes;
 
-ConfigManager cfg_manager(&config_mux);
+ConfigManager cfg_manager;
 
 
 
 /*----(HELPERS)----*/
 void exit();
 void reset();
+
+
+/*----(GET & POST HANDLERS)----*/
+HttpServer::Content getUriHandler(const char* uri);
+
+string postUriHandler(string uri, vector<uint8_t> payload);
 
 
 /*----(CONFIG HANDLING FUNCTIONS)----*/
@@ -161,11 +166,6 @@ bool isBBoxMasked(bbox_t bbox, const image_vector_t& mask, int mask_size, int im
 bool isInsideBox(int x, int y, int xmin, int xmax, int ymin, int ymax);
 
 
-/*----(GET & POST HANDLERS)----*/
-HttpServer::Content getUriHandler(const char* uri);
-
-string postUriHandler(string uri, vector<uint8_t> payload);
-
 
 
 /*----(MAIN ENTRYPOINT)----*/
@@ -177,7 +177,6 @@ extern "C" [[noreturn]] void app_main(void* param) {
     GpioSetMode(PIN1, GpioMode::kOutput);
 
 
-    config_mux = xSemaphoreCreateMutex();
     data_mux   = xSemaphoreCreateMutex();
     sync_sem   = xSemaphoreCreateBinary();
 
@@ -319,11 +318,107 @@ void reset() {
 }
 
 
+/*----(GET & POST HANDLERS)----*/
+/** @brief GET request handler
+ * 
+ * @param uri URI of the GET request
+ * @return HttpServer::Content
+ */
+HttpServer::Content getUriHandler(const char* uri) {
+    //root
+    if (StrEndsWith(uri, "index.shtml") || StrEndsWith(uri, "index.html"))
+        return string(MAIN_PAGE_RESPONSE);
+
+    //image and results
+    else if (StrEndsWith(uri, STREAM_WEB_PATH)) {
+        xSemaphoreTake(sync_sem, portMAX_DELAY);
+        MutexLock lock(data_mux);
+
+        //create packet with status, results and image and send it
+        vector<uint8_t> packet;
+        packet.push_back(gl_status + 128);
+        packet.push_back(gl_camera_time);
+        packet.push_back(gl_inference_time);
+        packet.push_back(gl_postprocess_time);
+        packet.push_back(gl_bboxes.size());
+        for (auto bbox : gl_bboxes) {
+            packet.push_back(bbox.score);
+            packet.push_back(bbox.type);
+            packet.push_back(bbox.xmax >> 8);
+            packet.push_back(bbox.xmax);
+            packet.push_back(bbox.ymax >> 8);
+            packet.push_back(bbox.ymax);
+            packet.push_back(bbox.xmin >> 8);
+            packet.push_back(bbox.xmin);
+            packet.push_back(bbox.ymin >> 8);
+            packet.push_back(bbox.ymin);
+        }
+        packet.push_back(gl_image_size >> 8);
+        packet.push_back(gl_image_size);
+        packet.insert(packet.end(), gl_image.begin(), gl_image.end());
+
+        return packet;
+    }
+
+    //detection only
+    else if (StrEndsWith(uri, DETECTION_STATUS_WEB_PATH)) {
+        vector<uint8_t> status;
+        status.push_back(gl_status);
+        return status;
+    }
+
+    //load config from device
+    else if (StrEndsWith(uri, CONFIG_LOAD_WEB_PATH)) {
+        return cfg_manager.toBinary();
+    }
+
+    //reset config
+    else if (StrEndsWith(uri, CONFIG_RESET_WEB_PATH)) {
+        cfg_manager.init();
+        gl_update_config = true;
+        if (!cfg_manager.save(CONFIG_PATH))
+            printf("Failed to save config to file\n");
+        
+        return cfg_manager.toBinary();
+    }
+
+    //POST OK
+    else if (StrEndsWith(uri, OK_WEB_PATH)) {
+        return string(OK_RESPONSE);
+    }
+
+    return {};
+}
+
+/** @brief POST request handler
+ * 
+ * @param uri URI of the POST request
+ * @param payload payload of the POST request
+ * @return string - URI path of OK file on success. Empty otherwise.
+ */
+string postUriHandler(string uri, vector<uint8_t> payload) {
+    //only config save is handled
+    if (!StrEndsWith(uri, CONFIG_SAVE_WEB_PATH))
+        return {};
+
+    if (!cfg_manager.fromBinary(payload))
+        return {};
+
+    gl_update_config = true;
+
+    if (cfg_manager.save(CONFIG_PATH))
+        return OK_WEB_PATH;
+
+    return {};
+}
+
+
 /*----(DETECTION TASK FUNCTIONS)----*/
 /** @brief Main detection task*/
 static void detectTask(void *args) {
     gl_status = 0;                          //set status
-    cfg_struct_t config = *cfg_manager.getConfig();        //copy current config
+    cfg_struct_t config;
+    cfg_manager.getConfigCopy(&config);        //copy current config
     gl_image.resize(IMAGE_SIZE);            //resize image
     image_vector_t background(IMAGE_SIZE);  //create background
 
@@ -356,10 +451,8 @@ static void detectTask(void *args) {
 
         //update config
         if (gl_update_config) {
-            xSemaphoreTake(config_mux, portMAX_DELAY);
-            config = *cfg_manager.getConfig();
+            cfg_manager.getConfigCopy(&config);
             gl_update_config = false;
-            xSemaphoreGive(config_mux);
             frame.rotation = static_cast<coralmicro::CameraRotation>(config.rotation);
         }
 
@@ -649,99 +742,4 @@ bool isBBoxMasked(bbox_t bbox, const image_vector_t& mask, int mask_size, int im
 /** @brief Helper function to check if the coordinates are inside the box.*/
 bool isInsideBox(int x, int y, int xmin, int xmax, int ymin, int ymax) {
     return (x >= xmin && x <= xmax && y >= ymin && y <= ymax);
-}
-
-
-/*----(GET & POST HANDLERS)----*/
-/** @brief GET request handler
- * 
- * @param uri URI of the GET request
- * @return HttpServer::Content
- */
-HttpServer::Content getUriHandler(const char* uri) {
-    //root
-    if (StrEndsWith(uri, "index.shtml") || StrEndsWith(uri, "index.html"))
-        return string(MAIN_PAGE_RESPONSE);
-
-    //image and results
-    else if (StrEndsWith(uri, STREAM_WEB_PATH)) {
-        xSemaphoreTake(sync_sem, portMAX_DELAY);
-        MutexLock lock(data_mux);
-
-        //create packet with status, results and image and send it
-        vector<uint8_t> packet;
-        packet.push_back(gl_status + 128);
-        packet.push_back(gl_camera_time);
-        packet.push_back(gl_inference_time);
-        packet.push_back(gl_postprocess_time);
-        packet.push_back(gl_bboxes.size());
-        for (auto bbox : gl_bboxes) {
-            packet.push_back(bbox.score);
-            packet.push_back(bbox.type);
-            packet.push_back(bbox.xmax >> 8);
-            packet.push_back(bbox.xmax);
-            packet.push_back(bbox.ymax >> 8);
-            packet.push_back(bbox.ymax);
-            packet.push_back(bbox.xmin >> 8);
-            packet.push_back(bbox.xmin);
-            packet.push_back(bbox.ymin >> 8);
-            packet.push_back(bbox.ymin);
-        }
-        packet.push_back(gl_image_size >> 8);
-        packet.push_back(gl_image_size);
-        packet.insert(packet.end(), gl_image.begin(), gl_image.end());
-
-        return packet;
-    }
-
-    //detection only
-    else if (StrEndsWith(uri, DETECTION_STATUS_WEB_PATH)) {
-        vector<uint8_t> status;
-        status.push_back(gl_status);
-        return status;
-    }
-
-    //load config from device
-    else if (StrEndsWith(uri, CONFIG_LOAD_WEB_PATH)) {
-        return cfg_manager.toBinary();
-    }
-
-    //reset config
-    else if (StrEndsWith(uri, CONFIG_RESET_WEB_PATH)) {
-        cfg_manager.init();
-        gl_update_config = true;
-        if (!cfg_manager.save(CONFIG_PATH))
-            printf("Failed to save config to file\n");
-        
-        return cfg_manager.toBinary();
-    }
-
-    //POST OK
-    else if (StrEndsWith(uri, OK_WEB_PATH)) {
-        return string(OK_RESPONSE);
-    }
-
-    return {};
-}
-
-/** @brief POST request handler
- * 
- * @param uri URI of the POST request
- * @param payload payload of the POST request
- * @return string - URI path of OK file on success. Empty otherwise.
- */
-string postUriHandler(string uri, vector<uint8_t> payload) {
-    //only config save is handled
-    if (!StrEndsWith(uri, CONFIG_SAVE_WEB_PATH))
-        return {};
-
-    if (!cfg_manager.fromBinary(payload))
-        return {};
-
-    gl_update_config = true;
-
-    if (cfg_manager.save(CONFIG_PATH))
-        return OK_WEB_PATH;
-
-    return {};
 }

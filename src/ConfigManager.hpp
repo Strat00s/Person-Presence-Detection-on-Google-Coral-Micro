@@ -49,17 +49,17 @@ class ConfigManager {
 private:
     /* data */
     cfg_struct_t config = {0};
-    SemaphoreHandle_t *config_mux;
+    SemaphoreHandle_t mux;
 
 public:
-    ConfigManager(SemaphoreHandle_t *config_mux) {
-        this->config_mux = config_mux;
+    ConfigManager() {
+        mux = xSemaphoreCreateMutex();
     } 
     //~ConfigManager();
 
     /** @brief Initialize config do default values.*/
     void init() {
-        xSemaphoreTake(*config_mux, portMAX_DELAY);
+        xSemaphoreTake(mux, portMAX_DELAY);
         config.mask_size    = DEFAULT_MASK_SIZE;
         config.mask_thresh  = DEFAULT_MASK_THRESH;
         config.rotation     = DEFAULT_ROTATION;
@@ -72,12 +72,14 @@ public:
         config.min_as_area  = DEFAULT_MIN_AS_AREA;
         config.mask.clear();
         config.mask.resize(config.mask_size * config.mask_size, 0);
-        xSemaphoreGive(*config_mux);
+        xSemaphoreGive(mux);
     }
 
-    /** @brief Get const pointer to the underlying config. Not thread safe!*/
-    const cfg_struct_t* getConfig() {
-        return &config;
+    /** @brief Get a copy of stored configuration.*/
+    void getConfigCopy(cfg_struct_t *config) {
+        xSemaphoreTake(mux, portMAX_DELAY);
+        *config = this->config;
+        xSemaphoreGive(mux);
     }
 
     /** @brief Save config to file.
@@ -97,9 +99,9 @@ public:
      * @return True on success, false otherwise.
      */
     bool update(const cfg_struct_t &new_config, const char *path) {
-        xSemaphoreTake(*config_mux, portMAX_DELAY);
+        xSemaphoreTake(mux, portMAX_DELAY);
         config = new_config;
-        xSemaphoreGive(*config_mux);
+        xSemaphoreGive(mux);
 
         vector<uint8_t> raw = toBinary();
         return LfsWriteFile(path, raw.data(), raw.size());
@@ -125,7 +127,7 @@ public:
     vector<uint8_t> toBinary() {
         vector<uint8_t> raw_data;
 
-        xSemaphoreTake(*config_mux, portMAX_DELAY);
+        xSemaphoreTake(mux, portMAX_DELAY);
         raw_data.push_back(config.mask_size);
         raw_data.push_back(config.mask_thresh);
         raw_data.push_back(config.rotation);
@@ -140,7 +142,7 @@ public:
         for (size_t i = 0; i < config.mask_size * config.mask_size; i++) {
             raw_data.push_back(config.mask[i]);
         }
-        xSemaphoreGive(*config_mux);
+        xSemaphoreGive(mux);
 
         return raw_data;
     }
@@ -158,7 +160,7 @@ public:
             return false;
 
         //copy the data
-        xSemaphoreTake(*config_mux, portMAX_DELAY);
+        xSemaphoreTake(mux, portMAX_DELAY);
         config.mask_size   = raw[0];
         config.mask_thresh = raw[1];
         config.rotation    = raw[2];
@@ -170,7 +172,7 @@ public:
         config.min_height  = raw[8];
         config.min_as_area = raw[9];
         config.mask        = vector<uint8>(raw.begin() + 10, raw.begin() + 10 + mask_size);
-        xSemaphoreGive(*config_mux);
+        xSemaphoreGive(mux);
 
 
         return true;
